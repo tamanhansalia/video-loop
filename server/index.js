@@ -20,6 +20,7 @@ import { startWorker, cancelJob } from './worker.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PORT = process.env.PORT || 5000
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024
 
 const UPLOADS_DIR = path.join(__dirname, '../uploads')
 const OUTPUTS_DIR = path.join(__dirname, '../outputs')
@@ -31,6 +32,11 @@ if (!fs.existsSync(OUTPUTS_DIR)) fs.mkdirSync(OUTPUTS_DIR, { recursive: true })
 const app = express()
 app.use(cors())
 app.use(express.json())
+
+const SYSTEM_INFO_TTL_MS = 30_000
+let systemInfoCache = null
+let systemInfoCacheAt = 0
+let systemInfoPromise = null
 
 // Serve output files and uploads statically
 app.use('/outputs', express.static(OUTPUTS_DIR))
@@ -47,8 +53,26 @@ const storage = multer.diskStorage({
 })
 const upload = multer({
   storage,
-  limits: { fileSize: 10 * 1024 * 1024 * 1024 }, // 10 GB max upload
+  limits: { fileSize: MAX_UPLOAD_BYTES },
 })
+
+function removeUploadedFiles(files) {
+  for (const file of files.filter(Boolean)) {
+    try { if (fs.existsSync(file.path)) fs.unlinkSync(file.path) } catch { /* best-effort cleanup */ }
+  }
+}
+
+function isAudioFile(file) {
+  if (!file) return false
+  const ext = path.extname(file.originalname).toLowerCase()
+  return file.mimetype.startsWith('audio/') || ['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.opus', '.wma'].includes(ext)
+}
+
+function invalidateSystemInfoCache() {
+  systemInfoCache = null
+  systemInfoCacheAt = 0
+  systemInfoPromise = null
+}
 
 // System stats helper
 function getDiskSpace() {
@@ -101,11 +125,51 @@ function broadcastJobUpdate(jobId) {
   }).catch(err => console.error('Broadcast error:', err))
 }
 
+async function loadSystemInfo() {
+  const now = Date.now()
+  if (systemInfoCache && now - systemInfoCacheAt < SYSTEM_INFO_TTL_MS) {
+    return systemInfoCache
+  }
+  if (systemInfoPromise) return systemInfoPromise
+
+  systemInfoPromise = Promise.all([
+    checkFfmpegInstalled(),
+    checkFfprobeInstalled(),
+    detectGPUEncoders(),
+    getDiskSpace(),
+  ]).then(([ffmpegInstalled, ffprobeInstalled, gpuEncoders, diskSpace]) => {
+    systemInfoCache = {
+      ffmpegInstalled,
+      ffprobeInstalled,
+      gpuEncoders,
+      diskSpace,
+      ffmpegPath: getFfmpegPath(),
+      ffprobePath: getFfprobePath()
+    }
+    systemInfoCacheAt = Date.now()
+    return systemInfoCache
+  }).finally(() => {
+    systemInfoPromise = null
+  })
+
+  return systemInfoPromise
+}
+
 // API Routes
 app.get('/api/jobs', async (req, res) => {
   try {
     const list = await getJobs()
     res.json(list)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.get('/api/jobs/:id', async (req, res) => {
+  try {
+    const job = await getJobById(req.params.id)
+    if (!job) return res.status(404).json({ error: 'Job not found' })
+    res.json(job)
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -154,6 +218,154 @@ app.post('/api/jobs', upload.fields([
   }
 })
 
+app.post('/api/audio-visual-jobs', upload.fields([
+  { name: 'visual', maxCount: 1 },
+  { name: 'audio', maxCount: 1 }
+]), async (req, res) => {
+  try {
+    const visualFile = req.files['visual'] ? req.files['visual'][0] : null
+    const audioFile = req.files['audio'] ? req.files['audio'][0] : null
+
+    if (!visualFile || !audioFile) {
+      return res.status(400).json({ error: 'A visual asset and an audio file are required.' })
+    }
+
+    const visualExt = path.extname(visualFile.originalname).toLowerCase()
+    const audioExt = path.extname(audioFile.originalname).toLowerCase()
+    const visualType = visualFile.mimetype.startsWith('image/') || ['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif'].includes(visualExt) ? 'image'
+      : visualFile.mimetype.startsWith('video/') || ['.mp4', '.mov', '.webm', '.mkv', '.avi', '.m4v'].includes(visualExt) ? 'video'
+      : null
+
+    if (!visualType) {
+      return res.status(400).json({ error: 'Visual asset must be an image or video file.' })
+    }
+    if (!audioFile.mimetype.startsWith('audio/') && !['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg'].includes(audioExt)) {
+      return res.status(400).json({ error: 'Audio track must be an audio file.' })
+    }
+
+    const { filename, animation_mode, hw_accel } = req.body
+    const mode = ['still', 'loop', 'pingpong'].includes(animation_mode) ? animation_mode : 'loop'
+    const id = Date.now().toString(36) + Math.random().toString(36).substr(2, 5)
+    const job = await createJob({
+      id,
+      filename: filename || visualFile.originalname,
+      input_video_path: visualFile.path,
+      input_audio_path: audioFile.path,
+      target_duration: 0,
+      hw_accel: hw_accel || 'auto',
+      status: 'pending',
+      job_type: 'audio_visual',
+      visual_type: visualType,
+      animation_mode: mode,
+    })
+
+    res.status(201).json(job)
+    startWorker(broadcastJobUpdate)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.post('/api/mp4-to-mp3-jobs', upload.single('video'), async (req, res) => {
+  const videoFile = req.file
+  try {
+    if (!videoFile) {
+      return res.status(400).json({ error: 'An MP4 video file is required.' })
+    }
+
+    const ext = path.extname(videoFile.originalname).toLowerCase()
+    if (ext !== '.mp4' && videoFile.mimetype !== 'video/mp4') {
+      removeUploadedFiles([videoFile])
+      return res.status(400).json({ error: 'Unsupported format. Upload an MP4 video file.' })
+    }
+
+    const id = Date.now().toString(36) + Math.random().toString(36).substr(2, 5)
+    const job = await createJob({
+      id,
+      filename: req.body.filename || videoFile.originalname,
+      input_video_path: videoFile.path,
+      target_duration: 0,
+      status: 'pending',
+      job_type: 'mp4_to_mp3',
+    })
+
+    res.status(201).json(job)
+    startWorker(broadcastJobUpdate)
+  } catch (err) {
+    removeUploadedFiles([videoFile])
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.post('/api/audio-merge-jobs', upload.array('audio'), async (req, res) => {
+  const audioFiles = req.files || []
+  try {
+    if (audioFiles.length < 5) {
+      removeUploadedFiles(audioFiles)
+      return res.status(400).json({ error: 'Upload at least 5 audio files to merge.' })
+    }
+
+    const invalid = audioFiles.find(file => !isAudioFile(file))
+    if (invalid) {
+      removeUploadedFiles(audioFiles)
+      return res.status(400).json({ error: `Unsupported audio file: ${invalid.originalname}` })
+    }
+
+    const id = Date.now().toString(36) + Math.random().toString(36).substr(2, 5)
+    const job = await createJob({
+      id,
+      filename: req.body.filename || 'Merged audio',
+      input_video_path: null,
+      input_audio_path: JSON.stringify(audioFiles.map(file => file.path)),
+      target_duration: 0,
+      status: 'pending',
+      job_type: 'audio_merge',
+    })
+
+    res.status(201).json(job)
+    startWorker(broadcastJobUpdate)
+  } catch (err) {
+    removeUploadedFiles(audioFiles)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.post('/api/audio-loop-jobs', upload.single('audio'), async (req, res) => {
+  const audioFile = req.file
+  try {
+    if (!audioFile) {
+      return res.status(400).json({ error: 'An audio file is required.' })
+    }
+    if (!isAudioFile(audioFile)) {
+      removeUploadedFiles([audioFile])
+      return res.status(400).json({ error: 'Unsupported format. Upload a valid audio file.' })
+    }
+
+    const targetDuration = parseInt(req.body.target_duration, 10)
+    if (!targetDuration || isNaN(targetDuration) || targetDuration < 1) {
+      removeUploadedFiles([audioFile])
+      return res.status(400).json({ error: 'Target duration must be at least 1 second.' })
+    }
+
+    const id = Date.now().toString(36) + Math.random().toString(36).substr(2, 5)
+    const job = await createJob({
+      id,
+      filename: req.body.filename || audioFile.originalname,
+      input_video_path: null,
+      input_audio_path: audioFile.path,
+      target_duration: targetDuration,
+      status: 'pending',
+      job_type: 'audio_loop',
+    })
+
+    res.status(201).json(job)
+    startWorker(broadcastJobUpdate)
+  } catch (err) {
+    removeUploadedFiles([audioFile])
+    res.status(500).json({ error: err.message })
+  }
+})
+
 app.post('/api/jobs/:id/cancel', async (req, res) => {
   try {
     const cancelled = await cancelJob(req.params.id)
@@ -174,7 +386,7 @@ app.post('/api/jobs/:id/retry', async (req, res) => {
 
     // Clean up prior output file
     if (job.output_path && fs.existsSync(job.output_path)) {
-      try { fs.unlinkSync(job.output_path) } catch {}
+      try { fs.unlinkSync(job.output_path) } catch { /* best-effort cleanup */ }
     }
 
     await updateJob(job.id, {
@@ -215,6 +427,9 @@ app.post('/api/jobs/:id/duplicate', async (req, res) => {
       reverse_mode: job.reverse_mode || 'disabled',
       loop_style: job.loop_style || 'standard',
       audio_fade: job.audio_fade || 'off',
+      job_type: job.job_type || 'loop',
+      visual_type: job.visual_type || 'video',
+      animation_mode: job.animation_mode || 'loop',
     })
 
     res.json(duplicated)
@@ -262,11 +477,11 @@ app.delete('/api/jobs', async (req, res) => {
         if (!job) continue
 
         if (['preparing', 'processing', 'finalizing'].includes(job.status)) {
-          try { await cancelJob(job.id) } catch {}
+          try { await cancelJob(job.id) } catch { /* best-effort cancellation */ }
         }
 
         if (job.output_path && fs.existsSync(job.output_path)) {
-          try { fs.unlinkSync(job.output_path) } catch {}
+          try { fs.unlinkSync(job.output_path) } catch { /* best-effort cleanup */ }
         }
 
         await deleteJob(job.id)
@@ -294,7 +509,7 @@ app.delete('/api/jobs/:id', async (req, res) => {
 
     // Clean up files
     if (job.output_path && fs.existsSync(job.output_path)) {
-      try { fs.unlinkSync(job.output_path) } catch {}
+      try { fs.unlinkSync(job.output_path) } catch { /* best-effort cleanup */ }
     }
     
     // We can also optionally delete uploads if no other jobs reference them
@@ -309,7 +524,7 @@ app.delete('/api/jobs/:id', async (req, res) => {
 
 app.get('/api/jobs/:id/logs', async (req, res) => {
   try {
-    const job = await getJobById(req.params.id)
+    const job = await getJobById(req.params.id, { includeLogs: true })
     if (!job) return res.status(404).json({ error: 'Job not found' })
     res.json({ logs: job.logs || '' })
   } catch (err) {
@@ -318,24 +533,17 @@ app.get('/api/jobs/:id/logs', async (req, res) => {
 })
 
 app.get('/api/system-info', async (req, res) => {
-  const ffmpegInstalled = await checkFfmpegInstalled()
-  const ffprobeInstalled = await checkFfprobeInstalled()
-  const gpuEncoders = await detectGPUEncoders()
-  const diskSpace = await getDiskSpace()
-
-  res.json({
-    ffmpegInstalled,
-    ffprobeInstalled,
-    gpuEncoders,
-    diskSpace,
-    ffmpegPath: getFfmpegPath(),
-    ffprobePath: getFfprobePath()
-  })
+  try {
+    res.json(await loadSystemInfo())
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
 })
 
 app.post('/api/settings/ffmpeg', (req, res) => {
   const { customFfmpeg, customFfprobe } = req.body
   setFfmpegPaths(customFfmpeg, customFfprobe)
+  invalidateSystemInfoCache()
   res.json({ success: true })
 })
 
@@ -365,12 +573,22 @@ app.post('/api/probe', upload.single('video'), async (req, res) => {
     const codec = videoStream?.codec_name || 'unknown'
     const hasAudio = !!audioStream
     // Clean up the probe temp file
-    try { fs.unlinkSync(file.path) } catch {}
+    try { fs.unlinkSync(file.path) } catch { /* best-effort cleanup */ }
     res.json({ duration, fps, width, height, codec, hasAudio, fpsStr })
   } catch (err) {
-    try { fs.unlinkSync(file.path) } catch {}
+    try { fs.unlinkSync(file.path) } catch { /* best-effort cleanup */ }
     res.status(500).json({ error: err.message })
   }
+})
+
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({ error: 'Uploaded file exceeds the configured size limit.' })
+    }
+    return res.status(400).json({ error: `Upload failed: ${err.message}` })
+  }
+  next(err)
 })
 
 // Initialize DB and launch server

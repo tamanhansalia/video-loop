@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react'
+import { useEffect } from 'react'
 
 export default function PreviewModal({ videoUrl, filename, onClose }) {
   useEffect(() => {
@@ -8,6 +8,8 @@ export default function PreviewModal({ videoUrl, filename, onClose }) {
   }, [onClose])
 
   if (!videoUrl) return null
+
+  const isAudio = /\.(mp3|wav|m4a|aac|flac|ogg|opus)$/i.test(videoUrl)
 
   return (
     <div
@@ -30,15 +32,21 @@ export default function PreviewModal({ videoUrl, filename, onClose }) {
           </button>
         </div>
 
-        {/* Video player */}
+        {/* Media player */}
         <div className="bg-black flex items-center justify-center">
-          <video
-            src={videoUrl}
-            className="w-full max-h-[70vh] object-contain"
-            controls
-            autoPlay
-            playsInline
-          />
+          {isAudio ? (
+            <div className="w-full px-6 py-12">
+              <audio src={videoUrl} className="w-full" controls autoPlay />
+            </div>
+          ) : (
+            <video
+              src={videoUrl}
+              className="w-full max-h-[70vh] object-contain"
+              controls
+              autoPlay
+              playsInline
+            />
+          )}
         </div>
 
         {/* Footer */}

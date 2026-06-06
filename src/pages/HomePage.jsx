@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Layout from '../components/Layout'
 
@@ -28,7 +28,7 @@ export default function HomePage() {
         </div>
 
         {/* Tool cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full max-w-2xl">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full max-w-4xl">
           {/* Loop Generator */}
           <button
             onClick={() => navigate('/loop')}
@@ -38,6 +38,54 @@ export default function HomePage() {
             <p className="text-sm font-bold uppercase tracking-wider text-white">Loop Generator</p>
             <p className="text-xs text-zinc-600 mt-2 leading-relaxed">
               Generate long YouTube loops from any source clip
+            </p>
+          </button>
+
+          {/* MP4 to MP3 */}
+          <button
+            onClick={() => navigate('/mp4-to-mp3')}
+            className="border border-zinc-900 p-8 cursor-pointer hover:border-zinc-700 hover:bg-zinc-950 transition-colors w-full text-left"
+          >
+            <p className="text-2xl font-mono text-zinc-700 mb-4">MP4 → MP3</p>
+            <p className="text-sm font-bold uppercase tracking-wider text-white">MP4 to MP3</p>
+            <p className="text-xs text-zinc-600 mt-2 leading-relaxed">
+              Extract full-length audio as a high-quality 320kbps MP3
+            </p>
+          </button>
+
+          {/* Audio Merger */}
+          <button
+            onClick={() => navigate('/audio-merge')}
+            className="border border-zinc-900 p-8 cursor-pointer hover:border-zinc-700 hover:bg-zinc-950 transition-colors w-full text-left"
+          >
+            <p className="text-2xl font-mono text-zinc-700 mb-4">A + B + C</p>
+            <p className="text-sm font-bold uppercase tracking-wider text-white">Audio Merger</p>
+            <p className="text-xs text-zinc-600 mt-2 leading-relaxed">
+              Combine five or more audio files into one continuous track
+            </p>
+          </button>
+
+          {/* Audio Looper */}
+          <button
+            onClick={() => navigate('/audio-loop')}
+            className="border border-zinc-900 p-8 cursor-pointer hover:border-zinc-700 hover:bg-zinc-950 transition-colors w-full text-left"
+          >
+            <p className="text-2xl font-mono text-zinc-700 mb-4">A x N</p>
+            <p className="text-sm font-bold uppercase tracking-wider text-white">Audio Looper</p>
+            <p className="text-xs text-zinc-600 mt-2 leading-relaxed">
+              Extend any audio file to an exact smooth-loop duration
+            </p>
+          </button>
+
+          {/* Audio Visual */}
+          <button
+            onClick={() => navigate('/audio-visual')}
+            className="border border-zinc-900 p-8 cursor-pointer hover:border-zinc-700 hover:bg-zinc-950 transition-colors w-full text-left"
+          >
+            <p className="text-2xl font-mono text-zinc-700 mb-4">♫ ▶ ▶ ▶</p>
+            <p className="text-sm font-bold uppercase tracking-wider text-white">Audio Visual</p>
+            <p className="text-xs text-zinc-600 mt-2 leading-relaxed">
+              Match an animated image or looping video to a full audio track
             </p>
           </button>
 
@@ -60,6 +108,12 @@ export default function HomePage() {
           className="text-xs text-zinc-700 hover:text-zinc-500 font-mono mt-6 transition-colors"
         >
           Settings →
+        </button>
+        <button
+          onClick={() => navigate('/history')}
+          className="text-xs text-zinc-700 hover:text-zinc-500 font-mono mt-2 transition-colors"
+        >
+          View complete history →
         </button>
 
         {/* System status strip */}

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import Layout from '../components/Layout'
 
@@ -105,9 +105,11 @@ export default function ReversePage() {
 
   useEffect(() => {
     if (!videoFile) {
-      setProbeResult(null)
-      setProbeError(null)
-      return
+      const resetProbe = setTimeout(() => {
+        setProbeResult(null)
+        setProbeError(null)
+      }, 0)
+      return () => clearTimeout(resetProbe)
     }
 
     let cancelled = false
@@ -426,7 +428,7 @@ export default function ReversePage() {
                   ['standard',  'Standard',  '▶ ▶ ▶ ▶', 'Clip repeats forward.'],
                   ['reverse',   'Reverse',   '◀ ◀ ◀ ◀', 'Clip plays end to start.'],
                   ['pingpong',  'Ping Pong', '▶ ◀ ▶ ◀', 'Forward then backward — seamless bounce.'],
-                ].map(([v, lbl, glyph, desc]) => (
+                ].map(([v, lbl, glyph]) => (
                   <button
                     key={v}
                     type="button"

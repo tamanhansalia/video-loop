@@ -128,6 +128,346 @@ function parseFps(fpsStr) {
   return parseFloat(fpsStr) || 30
 }
 
+function progressUpdates(prog, targetSec) {
+  const updates = {}
+  if (prog.timeSec !== undefined) {
+    updates.progress = Math.min(95, Math.round(10 + (prog.timeSec / targetSec) * 85))
+  }
+  if (prog.fps !== undefined) updates.fps = prog.fps
+  if (prog.speed !== undefined && prog.timeSec !== undefined && prog.speed > 0) {
+    updates.eta = Math.max(0, Math.round((targetSec - prog.timeSec) / prog.speed))
+  }
+  return updates
+}
+
+function parseAudioPathList(value) {
+  if (!value) return []
+  try {
+    const parsed = JSON.parse(value)
+    if (Array.isArray(parsed)) return parsed
+  } catch { /* not a JSON path list */ }
+  return [value]
+}
+
+function getAudioDurationFromMeta(metadata) {
+  const audioStream = metadata.streams?.find(s => s.channels > 0)
+  const duration = parseFloat(metadata.format?.duration || audioStream?.duration || 0)
+  return { audioStream, duration }
+}
+
+async function runAudioMergeJob(job, notify, ffmpeg) {
+  const inputPaths = parseAudioPathList(job.input_audio_path)
+  if (inputPaths.length < 5) throw new Error('Audio merger requires at least 5 input files.')
+
+  for (const audioPath of inputPaths) {
+    if (!fs.existsSync(audioPath)) throw new Error(`Audio file not found: ${audioPath}`)
+  }
+
+  await appendLog(job.id, `Audio merge: ${inputPaths.length} tracks`)
+  const durations = []
+  for (let i = 0; i < inputPaths.length; i++) {
+    const metadata = await probeFile(inputPaths[i])
+    const { audioStream, duration } = getAudioDurationFromMeta(metadata)
+    if (!audioStream || !duration || isNaN(duration) || duration <= 0) {
+      throw new Error(`Could not detect a valid audio stream in track ${i + 1}.`)
+    }
+    durations.push(duration)
+    await appendLog(job.id, `Track ${i + 1}: ${path.basename(inputPaths[i])} (${duration.toFixed(3)}s)`)
+  }
+
+  const totalDuration = durations.reduce((sum, value) => sum + value, 0)
+  const safeBase = path.basename(job.filename || 'merged_audio', path.extname(job.filename || ''))
+    .replace(/[<>:"/\\|?*]/g, '_')
+  const outputPath = path.join(OUTPUTS_DIR, `${safeBase}_merged_${Date.now()}.mp3`)
+  const inputArgs = inputPaths.flatMap(audioPath => ['-i', fp(audioPath)])
+  const filterInputs = inputPaths.map((_, index) => `[${index}:a]`).join('')
+  const filter = `${filterInputs}concat=n=${inputPaths.length}:v=0:a=1[outa]`
+
+  await notify({ target_duration: totalDuration, encoder_used: 'libmp3lame 320kbps', progress: 5 })
+  await appendLog(job.id, `Output duration: ${totalDuration.toFixed(3)}s. Merging sequentially with no inserted gaps.`)
+  await notify({ status: 'processing', progress: 10 })
+
+  try {
+    await runCommand(ffmpeg, [
+      ...inputArgs,
+      '-filter_complex', filter,
+      '-map', '[outa]',
+      '-vn',
+      '-c:a', 'libmp3lame',
+      '-b:a', '320k',
+      '-ar', '48000',
+      '-id3v2_version', '3',
+      '-write_xing', '1',
+      '-y', fp(outputPath),
+    ], job.id, prog => {
+      const updates = progressUpdates(prog, totalDuration)
+      if (Object.keys(updates).length) notify(updates)
+    })
+  } catch (err) {
+    try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath) } catch { /* best-effort cleanup */ }
+    throw err
+  }
+
+  if (!fs.existsSync(outputPath)) throw new Error('Merged audio output file was not created.')
+  const outputSize = fs.statSync(outputPath).size
+  await notify({
+    status: 'completed', progress: 100, fps: 0, eta: 0,
+    output_size: outputSize, output_path: outputPath,
+  })
+  await appendLog(job.id, `=== COMPLETE: ${path.basename(outputPath)} (${(outputSize / 1024 / 1024).toFixed(1)} MB) ===`)
+}
+
+async function runAudioLoopJob(job, notify, tempFiles, ffmpeg) {
+  const inputPath = job.input_audio_path
+  if (!inputPath || !fs.existsSync(inputPath)) throw new Error(`Audio file not found: ${inputPath}`)
+
+  const targetDuration = Number(job.target_duration)
+  if (!targetDuration || isNaN(targetDuration) || targetDuration <= 0) {
+    throw new Error('Target duration must be greater than zero.')
+  }
+
+  await appendLog(job.id, `Audio loop: ${path.basename(inputPath)} → ${targetDuration}s`)
+  const metadata = await probeFile(inputPath)
+  const { audioStream, duration } = getAudioDurationFromMeta(metadata)
+  if (!audioStream || !duration || isNaN(duration) || duration <= 0) {
+    throw new Error('Could not detect a valid audio stream duration.')
+  }
+
+  const safeBase = path.basename(job.filename || 'looped_audio', path.extname(job.filename || ''))
+    .replace(/[<>:"/\\|?*]/g, '_')
+  const outputPath = path.join(OUTPUTS_DIR, `${safeBase}_audio_loop_${Date.now()}.mp3`)
+
+  await notify({ target_duration: Math.ceil(targetDuration), encoder_used: 'libmp3lame 320kbps', progress: 5 })
+  await appendLog(job.id, `Source duration: ${duration.toFixed(3)}s. Output duration: ${targetDuration.toFixed(3)}s.`)
+  await notify({ status: 'processing', progress: 10 })
+
+  try {
+    if (targetDuration <= duration) {
+      await appendLog(job.id, 'Target is shorter than source. Trimming to the exact target duration.')
+      await runCommand(ffmpeg, [
+        '-i', fp(inputPath),
+        '-map', '0:a:0',
+        '-vn',
+        '-t', String(targetDuration),
+        '-c:a', 'libmp3lame',
+        '-b:a', '320k',
+        '-ar', '48000',
+        '-id3v2_version', '3',
+        '-write_xing', '1',
+        '-y', fp(outputPath),
+      ], job.id, prog => {
+        const updates = progressUpdates(prog, targetDuration)
+        if (Object.keys(updates).length) notify(updates)
+      })
+    } else {
+      const fadeDuration = Math.min(0.25, Math.max(0.001, duration / 4))
+      const cyclePath = path.join(TEMP_DIR, `${job.id}_audio_cycle.wav`)
+      tempFiles.push(cyclePath)
+      const middleStart = fadeDuration
+      const middleEnd = duration - fadeDuration
+      const filter = [
+        `[0:a]atrim=0:${fadeDuration.toFixed(6)},asetpts=PTS-STARTPTS[start]`,
+        `[0:a]atrim=${middleStart.toFixed(6)}:${middleEnd.toFixed(6)},asetpts=PTS-STARTPTS[mid]`,
+        `[0:a]atrim=${middleEnd.toFixed(6)}:${duration.toFixed(6)},asetpts=PTS-STARTPTS[end]`,
+        `[end][start]acrossfade=d=${fadeDuration.toFixed(6)}:c1=tri:c2=tri[wrap]`,
+        '[wrap][mid]concat=n=2:v=0:a=1[cycle]',
+      ].join(';')
+
+      await appendLog(job.id, `Building smooth cyclic audio bed with ${fadeDuration.toFixed(3)}s wrap crossfade.`)
+      await runCommand(ffmpeg, [
+        '-i', fp(inputPath),
+        '-filter_complex', filter,
+        '-map', '[cycle]',
+        '-vn',
+        '-c:a', 'pcm_s16le',
+        '-ar', '48000',
+        '-y', fp(cyclePath),
+      ], job.id)
+
+      if (!fs.existsSync(cyclePath)) throw new Error('Loop cycle audio file was not created.')
+      await appendLog(job.id, 'Rendering exact duration from smooth cyclic bed.')
+      await runCommand(ffmpeg, [
+        '-stream_loop', '-1',
+        '-i', fp(cyclePath),
+        '-map', '0:a:0',
+        '-vn',
+        '-t', String(targetDuration),
+        '-c:a', 'libmp3lame',
+        '-b:a', '320k',
+        '-ar', '48000',
+        '-id3v2_version', '3',
+        '-write_xing', '1',
+        '-y', fp(outputPath),
+      ], job.id, prog => {
+        const updates = progressUpdates(prog, targetDuration)
+        if (Object.keys(updates).length) notify(updates)
+      })
+    }
+  } catch (err) {
+    try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath) } catch { /* best-effort cleanup */ }
+    throw err
+  }
+
+  if (!fs.existsSync(outputPath)) throw new Error('Looped audio output file was not created.')
+  const outputSize = fs.statSync(outputPath).size
+  await notify({
+    status: 'completed', progress: 100, fps: 0, eta: 0,
+    output_size: outputSize, output_path: outputPath,
+  })
+  await appendLog(job.id, `=== COMPLETE: ${path.basename(outputPath)} (${(outputSize / 1024 / 1024).toFixed(1)} MB) ===`)
+}
+
+async function runAudioVisualJob(job, notify, tempFiles, ffmpeg) {
+  const visualPath = job.input_video_path
+  const audioPath = job.input_audio_path
+  if (!fs.existsSync(visualPath)) throw new Error(`Visual asset not found: ${visualPath}`)
+  if (!audioPath || !fs.existsSync(audioPath)) throw new Error(`Audio track not found: ${audioPath}`)
+
+  await appendLog(job.id, `Audio-visual render: ${job.visual_type} visual, ${job.animation_mode} mode`)
+  const audioMeta = await probeFile(audioPath)
+  const audioStream = audioMeta.streams?.find(s => s.channels > 0)
+  const audioDuration = parseFloat(audioMeta.format?.duration || audioStream?.duration || 0)
+  if (!audioStream || !audioDuration || isNaN(audioDuration) || audioDuration <= 0) {
+    throw new Error('Could not detect a valid audio stream duration.')
+  }
+
+  let encoder
+  try {
+    encoder = await getBestEncoder(job.hw_accel)
+  } catch (err) {
+    await appendLog(job.id, `GPU encoder unavailable: ${err.message}. Falling back to libx264.`)
+    encoder = 'libx264'
+  }
+  await notify({ target_duration: Math.ceil(audioDuration), encoder_used: encoder, progress: 5 })
+  await appendLog(job.id, `Audio duration: ${audioDuration.toFixed(3)}s. Output will match it exactly.`)
+
+  const safeBase = path.basename(job.filename, path.extname(job.filename))
+    .replace(/[<>:"/\\|?*]/g, '_')
+  const outputPath = path.join(OUTPUTS_DIR, `${safeBase}_audio_visual_${Date.now()}.mp4`)
+  const finalArgs = []
+
+  if (job.visual_type === 'image') {
+    const imageFilters = {
+      still: 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p',
+      loop: "scale=7680:-1,zoompan=z='1.08':x='iw/2-(iw/zoom/2)+(iw-iw/zoom)/2*sin(2*PI*on/(30*8))':y='ih/2-(ih/zoom/2)+(ih-ih/zoom)/2*cos(2*PI*on/(30*8))':d=1:s=1920x1080:fps=30,format=yuv420p",
+      pingpong: "scale=7680:-1,zoompan=z='1.04+0.04*(1-cos(2*PI*on/(30*8)))/2':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=1920x1080:fps=30,format=yuv420p",
+    }
+    finalArgs.push(
+      '-loop', '1', '-framerate', '30', '-i', fp(visualPath),
+      '-i', fp(audioPath),
+      '-vf', imageFilters[job.animation_mode] || imageFilters.loop,
+      '-map', '0:v', '-map', '1:a',
+    )
+  } else {
+    let sourcePath = visualPath
+    if (job.animation_mode === 'pingpong') {
+      const visualMeta = await probeFile(visualPath)
+      const vStream = visualMeta.streams?.find(s => s.width > 0 && s.codec_name)
+      const videoDuration = parseFloat(visualMeta.format?.duration)
+      if (!vStream || !videoDuration || videoDuration <= 0) throw new Error('Could not detect a valid visual video stream.')
+      const fps = parseFps(vStream.avg_frame_rate)
+      const frameDuration = 1 / fps
+      if (videoDuration <= frameDuration * 2) throw new Error('Visual video is too short for ping-pong mode.')
+      const pingPongPath = path.join(TEMP_DIR, `${job.id}_av_pp.mp4`)
+      tempFiles.push(pingPongPath)
+      const trimEnd = videoDuration - frameDuration
+      const filter = [
+        `[0:v]fps=${fps.toFixed(6)},split=2[fw][bwsrc]`,
+        `[bwsrc]trim=start=${frameDuration.toFixed(6)}:end=${trimEnd.toFixed(6)},setpts=PTS-STARTPTS,reverse[bw]`,
+        '[fw][bw]concat=n=2:v=1:a=0[out]',
+      ].join(';')
+      await appendLog(job.id, 'Building seamless ping-pong visual cycle.')
+      await runCommand(ffmpeg, [
+        '-i', fp(visualPath), '-filter_complex', filter, '-map', '[out]', '-an',
+        '-c:v', 'libx264', ...encoderQualityArgs('libx264'), '-pix_fmt', 'yuv420p', '-y', fp(pingPongPath),
+      ], job.id)
+      sourcePath = pingPongPath
+    }
+    finalArgs.push(
+      '-stream_loop', '-1', '-i', fp(sourcePath),
+      '-i', fp(audioPath),
+      '-map', '0:v', '-map', '1:a',
+    )
+  }
+
+  await notify({ status: 'processing', progress: 10 })
+  await appendLog(job.id, 'Rendering visual track to the full audio duration.')
+  const render = selectedEncoder => runCommand(ffmpeg, [
+    ...finalArgs,
+    '-c:v', selectedEncoder, ...encoderQualityArgs(selectedEncoder),
+    '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000',
+    '-t', String(audioDuration), '-movflags', '+faststart', '-y', fp(outputPath),
+  ], job.id, prog => {
+    const updates = progressUpdates(prog, audioDuration)
+    if (Object.keys(updates).length) notify(updates)
+  })
+  try {
+    await render(encoder)
+  } catch (err) {
+    if (encoder === 'libx264') throw err
+    try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath) } catch { /* best-effort cleanup */ }
+    encoder = 'libx264'
+    await notify({ encoder_used: encoder, progress: 10 })
+    await appendLog(job.id, `Hardware render failed: ${err.message}. Retrying with libx264.`)
+    await render(encoder)
+  }
+  if (!fs.existsSync(outputPath)) throw new Error('Audio-visual output file was not created.')
+
+  const outputSize = fs.statSync(outputPath).size
+  await notify({
+    status: 'completed', progress: 100, fps: 0, eta: 0,
+    output_size: outputSize, output_path: outputPath,
+  })
+  await appendLog(job.id, `=== COMPLETE: ${path.basename(outputPath)} (${(outputSize / 1024 / 1024).toFixed(1)} MB) ===`)
+}
+
+async function runMp4ToMp3Job(job, notify, ffmpeg) {
+  const inputPath = job.input_video_path
+  if (!fs.existsSync(inputPath)) throw new Error(`Input MP4 file not found: ${inputPath}`)
+
+  await appendLog(job.id, `MP4 to MP3 extraction: ${path.basename(inputPath)}`)
+  const metadata = await probeFile(inputPath)
+  const audioStream = metadata.streams?.find(s => s.channels > 0)
+  const duration = parseFloat(metadata.format?.duration || audioStream?.duration || 0)
+  if (!audioStream) throw new Error('The uploaded MP4 does not contain an audio stream.')
+  if (!duration || isNaN(duration) || duration <= 0) throw new Error('Could not detect a valid audio duration.')
+
+  const safeBase = path.basename(job.filename, path.extname(job.filename))
+    .replace(/[<>:"/\\|?*]/g, '_')
+  const outputPath = path.join(OUTPUTS_DIR, `${safeBase}_320kbps_${Date.now()}.mp3`)
+
+  await notify({ target_duration: Math.ceil(duration), encoder_used: 'libmp3lame 320kbps', progress: 5 })
+  await appendLog(job.id, `Audio duration: ${duration.toFixed(3)}s. Encoding constant bitrate MP3 at 320kbps.`)
+  await notify({ status: 'processing', progress: 10 })
+
+  try {
+    await runCommand(ffmpeg, [
+      '-i', fp(inputPath),
+      '-map', '0:a:0',
+      '-vn',
+      '-c:a', 'libmp3lame',
+      '-b:a', '320k',
+      '-id3v2_version', '3',
+      '-write_xing', '1',
+      '-y', fp(outputPath),
+    ], job.id, prog => {
+      const updates = progressUpdates(prog, duration)
+      if (Object.keys(updates).length) notify(updates)
+    })
+  } catch (err) {
+    try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath) } catch { /* best-effort cleanup */ }
+    throw err
+  }
+
+  if (!fs.existsSync(outputPath)) throw new Error('MP3 output file was not created.')
+  const outputSize = fs.statSync(outputPath).size
+  await notify({
+    status: 'completed', progress: 100, fps: 0, eta: 0,
+    output_size: outputSize, output_path: outputPath,
+  })
+  await appendLog(job.id, `=== COMPLETE: ${path.basename(outputPath)} (${(outputSize / 1024 / 1024).toFixed(1)} MB) ===`)
+}
+
 // Audio fade duration lookup
 const AUDIO_FADE_SECONDS = { off: 0.01, short: 0.1, medium: 0.3, long: 0.5 }
 
@@ -135,9 +475,30 @@ async function runRenderJob(job) {
   const id = job.id
   console.log(`[worker] Starting job: ${id}`)
 
-  const notify = async (updates) => {
-    await updateJob(id, updates)
-    if (onUpdateCallback) onUpdateCallback(id)
+  let notifyQueue = Promise.resolve()
+  let lastProgressNotifyAt = 0
+  let lastProgressValue = null
+  const notify = (updates) => {
+    const keys = Object.keys(updates)
+    const progressOnly = keys.length > 0 && keys.every(key => ['progress', 'fps', 'eta'].includes(key))
+    if (progressOnly) {
+      const now = Date.now()
+      const nextProgress = updates.progress ?? lastProgressValue
+      const progressDelta = nextProgress === null || lastProgressValue === null
+        ? Infinity
+        : Math.abs(nextProgress - lastProgressValue)
+      if (now - lastProgressNotifyAt < 750 && progressDelta < 2) {
+        return notifyQueue
+      }
+      lastProgressNotifyAt = now
+      lastProgressValue = nextProgress
+    }
+
+    notifyQueue = notifyQueue.then(async () => {
+      await updateJob(id, updates)
+      if (onUpdateCallback) onUpdateCallback(id)
+    })
+    return notifyQueue
   }
 
   await notify({ status: 'preparing', progress: 2 })
@@ -164,6 +525,23 @@ async function runRenderJob(job) {
   await appendLog(id, `Settings: reverseMode=${reverseMode} loopStyle=${loopStyle} audioFade=${audioFade}`)
 
   try {
+    if (job.job_type === 'audio_visual') {
+      await runAudioVisualJob(job, notify, tempFiles, ffmpeg)
+      return
+    }
+    if (job.job_type === 'mp4_to_mp3') {
+      await runMp4ToMp3Job(job, notify, ffmpeg)
+      return
+    }
+    if (job.job_type === 'audio_merge') {
+      await runAudioMergeJob(job, notify, ffmpeg)
+      return
+    }
+    if (job.job_type === 'audio_loop') {
+      await runAudioLoopJob(job, notify, tempFiles, ffmpeg)
+      return
+    }
+
     // ── 1. Validate & probe input video ────────────────────────────────────────
     if (!fs.existsSync(job.input_video_path)) {
       throw new Error(`Input video not found: ${job.input_video_path}`)
@@ -512,15 +890,7 @@ async function runRenderJob(job) {
     await appendLog(id, 'Starting final render…')
 
     await runCommand(ffmpeg, finalArgs, id, (prog) => {
-      const updates = {}
-      if (prog.timeSec !== undefined) {
-        updates.progress = Math.min(95, Math.round(10 + (prog.timeSec / targetSec) * 85))
-      }
-      if (prog.fps !== undefined) updates.fps = prog.fps
-      if (prog.speed !== undefined && prog.timeSec !== undefined) {
-        const remaining = targetSec - prog.timeSec
-        if (prog.speed > 0) updates.eta = Math.max(0, Math.round(remaining / prog.speed))
-      }
+      const updates = progressUpdates(prog, targetSec)
       if (Object.keys(updates).length) notify(updates)
     })
 

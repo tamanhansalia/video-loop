@@ -1,4 +1,3 @@
-import React from 'react'
 import { NavLink } from 'react-router-dom'
 
 export default function Layout({ children }) {
@@ -15,11 +14,16 @@ export default function Layout({ children }) {
           >
             LOOPSTUDIO
           </NavLink>
-          <nav className="flex items-center gap-6">
+          <nav className="flex items-center gap-5 overflow-x-auto whitespace-nowrap">
             {[
               ['/', 'Home', true],
               ['/loop', 'Loop', false],
               ['/reverse', 'Reverse Video', false],
+              ['/audio-visual', 'Audio Visual', false],
+              ['/mp4-to-mp3', 'MP4 to MP3', false],
+              ['/audio-merge', 'Audio Merger', false],
+              ['/audio-loop', 'Audio Looper', false],
+              ['/history', 'History', false],
               ['/settings', 'Settings', false],
             ].map(([to, label, exact]) => (
               <NavLink

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import PreviewModal from './PreviewModal'
 import LogViewer from './LogViewer'
@@ -129,8 +129,10 @@ export default function StudioDashboard() {
   }
 
   useEffect(() => {
-    loadJobs()
-    loadSysInfo()
+    const initialLoad = setTimeout(() => {
+      loadJobs()
+      loadSysInfo()
+    }, 0)
 
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const ws = new WebSocket(`${proto}//localhost:5000`)
@@ -155,7 +157,10 @@ export default function StudioDashboard() {
 
     ws.onerror = () => { /* silent - app works without WS */ }
 
-    return () => { try { ws.close() } catch { /* ignore */ } }
+    return () => {
+      clearTimeout(initialLoad)
+      try { ws.close() } catch { /* ignore */ }
+    }
   }, [])
 
   // ─── Computed Values ───────────────────────────────────────────────────────
@@ -797,6 +802,18 @@ function JobCard({ job, onCancel, onRetry, onDuplicate, onReveal, onDelete, onPr
             <span>{formatDuration(job.target_duration)}</span>
             {job.resolution && <><span className="text-zinc-800">·</span><span>{job.resolution}</span></>}
             {job.encoder_used && <><span className="text-zinc-800">·</span><span>{job.encoder_used}</span></>}
+            {job.job_type === 'audio_visual' && (
+              <><span className="text-zinc-800">·</span><span className="text-zinc-500">Audio Visual · {job.animation_mode || 'loop'}</span></>
+            )}
+            {job.job_type === 'mp4_to_mp3' && (
+              <><span className="text-zinc-800">·</span><span className="text-zinc-500">MP3 · 320kbps</span></>
+            )}
+            {job.job_type === 'audio_merge' && (
+              <><span className="text-zinc-800">·</span><span className="text-zinc-500">Audio Merger · 320kbps</span></>
+            )}
+            {job.job_type === 'audio_loop' && (
+              <><span className="text-zinc-800">·</span><span className="text-zinc-500">Audio Looper · 320kbps</span></>
+            )}
             {job.loop_style && job.loop_style !== 'standard' && (
               <><span className="text-zinc-800">·</span>
               <span className="text-zinc-500">
@@ -885,6 +902,13 @@ function JobCard({ job, onCancel, onRetry, onDuplicate, onReveal, onDelete, onPr
             <Lnk onClick={() => onPreview(`/outputs/${outFile}`, job.filename)} cls="text-white hover:text-zinc-300">
               Play
             </Lnk>
+            <a
+              href={`/outputs/${outFile}`}
+              download={outFile}
+              className="text-xs font-mono transition-colors underline underline-offset-2 decoration-zinc-800 hover:decoration-current text-white hover:text-zinc-300"
+            >
+              Download
+            </a>
             <Lnk onClick={() => onReveal(job.id)}>Open Folder</Lnk>
           </>
         )}
@@ -913,24 +937,6 @@ function Label({ children, sub }) {
   )
 }
 
-function Field({ label, children }) {
-  return (
-    <div>
-      <label className="block text-xs text-zinc-600 mb-1">{label}</label>
-      {children}
-    </div>
-  )
-}
-
-function MonoInput({ value, onChange, placeholder }) {
-  return (
-    <input
-      value={value} onChange={onChange} placeholder={placeholder}
-      className="w-full bg-black border border-zinc-800 px-3 py-1.5 text-xs text-white font-mono focus:border-zinc-600 outline-none placeholder-zinc-800 transition-colors"
-    />
-  )
-}
-
 function Alert({ type, children }) {
   const cls = type === 'error'
     ? 'border-red-900 bg-red-950/20 text-red-400'
@@ -939,20 +945,6 @@ function Alert({ type, children }) {
     <div className={`border px-4 py-3 text-xs leading-relaxed ${cls}`}>
       {children}
     </div>
-  )
-}
-
-function Btn({ children, type = 'button', onClick, ghost }) {
-  return (
-    <button
-      type={type} onClick={onClick}
-      className={`px-3 py-1 text-xs border transition-colors
-        ${ghost
-          ? 'border-zinc-800 text-zinc-500 hover:text-white hover:border-zinc-600'
-          : 'border-zinc-700 bg-zinc-800 text-white hover:bg-zinc-700'}`}
-    >
-      {children}
-    </button>
   )
 }
 

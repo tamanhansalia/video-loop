@@ -15,6 +15,39 @@ let dbType = 'json' // 'sqlite' or 'json'
 let sqliteDb = null
 let jsonDb = { jobs: [] }
 
+const JOB_COLUMNS = [
+  'id',
+  'filename',
+  'input_video_path',
+  'input_audio_path',
+  'target_duration',
+  'crossfade',
+  'hw_accel',
+  'status',
+  'progress',
+  'fps',
+  'eta',
+  'output_size',
+  'output_path',
+  'resolution',
+  'encoder_used',
+  'error_message',
+  'created_at',
+  'reverse_mode',
+  'loop_style',
+  'audio_fade',
+  'job_type',
+  'visual_type',
+  'animation_mode',
+]
+
+const JOB_SUMMARY_SELECT = JOB_COLUMNS.join(', ')
+
+function withoutLogs(job) {
+  if (!job) return job
+  return Object.fromEntries(Object.entries(job).filter(([key]) => key !== 'logs'))
+}
+
 // Helper for JSON DB
 function loadJsonDb() {
   try {
@@ -79,7 +112,10 @@ export async function initDb() {
               logs TEXT,
               reverse_mode TEXT DEFAULT 'disabled',
               loop_style TEXT DEFAULT 'standard',
-              audio_fade TEXT DEFAULT 'off'
+              audio_fade TEXT DEFAULT 'off',
+              job_type TEXT DEFAULT 'loop',
+              visual_type TEXT DEFAULT 'video',
+              animation_mode TEXT DEFAULT 'loop'
             )
           `, (err) => {
             if (err) {
@@ -93,6 +129,9 @@ export async function initDb() {
                 "ALTER TABLE jobs ADD COLUMN reverse_mode TEXT DEFAULT 'disabled'",
                 "ALTER TABLE jobs ADD COLUMN loop_style TEXT DEFAULT 'standard'",
                 "ALTER TABLE jobs ADD COLUMN audio_fade TEXT DEFAULT 'off'",
+                "ALTER TABLE jobs ADD COLUMN job_type TEXT DEFAULT 'loop'",
+                "ALTER TABLE jobs ADD COLUMN visual_type TEXT DEFAULT 'video'",
+                "ALTER TABLE jobs ADD COLUMN animation_mode TEXT DEFAULT 'loop'",
               ]
               let pending = migrations.length
               for (const sql of migrations) {
@@ -135,29 +174,34 @@ export async function initDb() {
 }
 
 // DB API
-export function getJobs() {
+export function getJobs(options = {}) {
+  const includeLogs = options.includeLogs === true
   return new Promise((resolve, reject) => {
     if (dbType === 'sqlite') {
-      sqliteDb.all('SELECT * FROM jobs ORDER BY created_at DESC', (err, rows) => {
+      const columns = includeLogs ? '*' : JOB_SUMMARY_SELECT
+      sqliteDb.all(`SELECT ${columns} FROM jobs ORDER BY created_at DESC`, (err, rows) => {
         if (err) reject(err)
         else resolve(rows || [])
       })
     } else {
-      resolve([...jsonDb.jobs].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)))
+      const rows = [...jsonDb.jobs].sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+      resolve(includeLogs ? rows : rows.map(withoutLogs))
     }
   })
 }
 
-export function getJobById(id) {
+export function getJobById(id, options = {}) {
+  const includeLogs = options.includeLogs === true
   return new Promise((resolve, reject) => {
     if (dbType === 'sqlite') {
-      sqliteDb.get('SELECT * FROM jobs WHERE id = ?', [id], (err, row) => {
+      const columns = includeLogs ? '*' : JOB_SUMMARY_SELECT
+      sqliteDb.get(`SELECT ${columns} FROM jobs WHERE id = ?`, [id], (err, row) => {
         if (err) reject(err)
         else resolve(row || null)
       })
     } else {
       const job = jsonDb.jobs.find(j => j.id === id)
-      resolve(job || null)
+      resolve(includeLogs ? (job || null) : withoutLogs(job || null))
     }
   })
 }
@@ -186,6 +230,9 @@ export function createJob(job) {
       reverse_mode: job.reverse_mode || 'disabled',
       loop_style: job.loop_style || 'standard',
       audio_fade: job.audio_fade || 'off',
+      job_type: job.job_type || 'loop',
+      visual_type: job.visual_type || 'video',
+      animation_mode: job.animation_mode || 'loop',
     }
 
     if (dbType === 'sqlite') {
@@ -193,14 +240,15 @@ export function createJob(job) {
         INSERT INTO jobs (
           id, filename, input_video_path, input_audio_path, target_duration, crossfade, hw_accel, status,
           progress, fps, eta, output_size, output_path, resolution, encoder_used, error_message, created_at, logs,
-          reverse_mode, loop_style, audio_fade
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          reverse_mode, loop_style, audio_fade, job_type, visual_type, animation_mode
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       stmt.run(
         newJob.id, newJob.filename, newJob.input_video_path, newJob.input_audio_path, newJob.target_duration,
         newJob.crossfade, newJob.hw_accel, newJob.status, newJob.progress, newJob.fps, newJob.eta,
         newJob.output_size, newJob.output_path, newJob.resolution, newJob.encoder_used, newJob.error_message,
         newJob.created_at, newJob.logs, newJob.reverse_mode, newJob.loop_style, newJob.audio_fade,
+        newJob.job_type, newJob.visual_type, newJob.animation_mode,
         (err) => {
           if (err) reject(err)
           else resolve(newJob)

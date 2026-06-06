@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 export default function LogViewer({ jobId, filename, onClose }) {
   const [logs, setLogs] = useState('')
@@ -6,8 +6,8 @@ export default function LogViewer({ jobId, filename, onClose }) {
   const [error, setError] = useState(null)
   const scrollRef = useRef(null)
 
-  const fetchLogs = async () => {
-    setLoading(true)
+  const fetchLogs = useCallback(async ({ showLoading = true } = {}) => {
+    if (showLoading) setLoading(true)
     setError(null)
     try {
       const r = await fetch(`/api/jobs/${jobId}/logs`)
@@ -19,13 +19,16 @@ export default function LogViewer({ jobId, filename, onClose }) {
     } finally {
       setLoading(false)
     }
-  }
+  }, [jobId])
 
   useEffect(() => {
-    fetchLogs()
+    const initial = setTimeout(() => { fetchLogs({ showLoading: false }) }, 0)
     const iv = setInterval(fetchLogs, 4000)
-    return () => clearInterval(iv)
-  }, [jobId])
+    return () => {
+      clearTimeout(initial)
+      clearInterval(iv)
+    }
+  }, [fetchLogs])
 
   useEffect(() => {
     if (scrollRef.current) {

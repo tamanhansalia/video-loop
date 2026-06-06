@@ -22,3 +22,10 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Local data, uploads and outputs
+data/
+uploads/
+outputs/
+.blackbox/
+.blackboxcli/
