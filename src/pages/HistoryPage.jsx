@@ -44,6 +44,10 @@ const getTool = job => {
   if (job.job_type === 'mp4_to_mp3') return { category: 'mp3', label: 'MP4 to MP3 Converter', detail: 'Audio extraction · CBR 320kbps' }
   if (job.job_type === 'audio_merge') return { category: 'audio_merge', label: 'Audio Merger', detail: 'Sequential audio merge · CBR 320kbps' }
   if (job.job_type === 'audio_loop') return { category: 'audio_loop', label: 'Audio Looper', detail: 'Smooth cyclic audio loop · CBR 320kbps' }
+  if (job.job_type === 'audio_loop') {
+    const modeDetail = job.audio_loop_mode === 'repeat_count' && job.repeat_count ? `${job.repeat_count}x repeats` : 'Exact duration'
+    return { category: 'audio_loop', label: 'Audio Looper', detail: `Smooth cyclic audio loop · ${modeDetail} · CBR 320kbps` }
+  }
   if (job.job_type === 'audio_visual') {
     const visual = job.visual_type === 'image' ? 'Image' : 'Video'
     const mode = job.animation_mode === 'pingpong' ? 'Ping-Pong Animation'
@@ -166,6 +170,7 @@ export default function HistoryPage() {
                     <p className="text-xs text-zinc-700 mt-0.5">{tool.detail}</p>
                     <div className="flex flex-wrap gap-x-3 gap-y-1 mt-2 text-xs font-mono text-zinc-700">
                       {formatDuration(job.target_duration) && <span>{formatDuration(job.target_duration)}</span>}
+                      {job.job_type === 'audio_loop' && job.audio_loop_mode === 'repeat_count' && job.repeat_count ? <span>{job.repeat_count}x repeats</span> : null}
                       {job.resolution && <span>{job.resolution}</span>}
                       {job.encoder_used && <span>{job.encoder_used}</span>}
                       {formatBytes(job.output_size) && <span>{formatBytes(job.output_size)}</span>}

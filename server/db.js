@@ -39,6 +39,8 @@ const JOB_COLUMNS = [
   'job_type',
   'visual_type',
   'animation_mode',
+  'audio_loop_mode',
+  'repeat_count',
 ]
 
 const JOB_SUMMARY_SELECT = JOB_COLUMNS.join(', ')
@@ -115,7 +117,9 @@ export async function initDb() {
               audio_fade TEXT DEFAULT 'off',
               job_type TEXT DEFAULT 'loop',
               visual_type TEXT DEFAULT 'video',
-              animation_mode TEXT DEFAULT 'loop'
+              animation_mode TEXT DEFAULT 'loop',
+              audio_loop_mode TEXT DEFAULT 'duration',
+              repeat_count INTEGER
             )
           `, (err) => {
             if (err) {
@@ -132,6 +136,8 @@ export async function initDb() {
                 "ALTER TABLE jobs ADD COLUMN job_type TEXT DEFAULT 'loop'",
                 "ALTER TABLE jobs ADD COLUMN visual_type TEXT DEFAULT 'video'",
                 "ALTER TABLE jobs ADD COLUMN animation_mode TEXT DEFAULT 'loop'",
+                "ALTER TABLE jobs ADD COLUMN audio_loop_mode TEXT DEFAULT 'duration'",
+                "ALTER TABLE jobs ADD COLUMN repeat_count INTEGER",
               ]
               let pending = migrations.length
               for (const sql of migrations) {
@@ -233,6 +239,8 @@ export function createJob(job) {
       job_type: job.job_type || 'loop',
       visual_type: job.visual_type || 'video',
       animation_mode: job.animation_mode || 'loop',
+      audio_loop_mode: job.audio_loop_mode || 'duration',
+      repeat_count: job.repeat_count || null,
     }
 
     if (dbType === 'sqlite') {
@@ -240,15 +248,15 @@ export function createJob(job) {
         INSERT INTO jobs (
           id, filename, input_video_path, input_audio_path, target_duration, crossfade, hw_accel, status,
           progress, fps, eta, output_size, output_path, resolution, encoder_used, error_message, created_at, logs,
-          reverse_mode, loop_style, audio_fade, job_type, visual_type, animation_mode
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          reverse_mode, loop_style, audio_fade, job_type, visual_type, animation_mode, audio_loop_mode, repeat_count
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       stmt.run(
         newJob.id, newJob.filename, newJob.input_video_path, newJob.input_audio_path, newJob.target_duration,
         newJob.crossfade, newJob.hw_accel, newJob.status, newJob.progress, newJob.fps, newJob.eta,
         newJob.output_size, newJob.output_path, newJob.resolution, newJob.encoder_used, newJob.error_message,
         newJob.created_at, newJob.logs, newJob.reverse_mode, newJob.loop_style, newJob.audio_fade,
-        newJob.job_type, newJob.visual_type, newJob.animation_mode,
+        newJob.job_type, newJob.visual_type, newJob.animation_mode, newJob.audio_loop_mode, newJob.repeat_count,
         (err) => {
           if (err) reject(err)
           else resolve(newJob)

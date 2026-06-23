@@ -221,8 +221,10 @@ async function runAudioLoopJob(job, notify, tempFiles, ffmpeg) {
   const inputPath = job.input_audio_path
   if (!inputPath || !fs.existsSync(inputPath)) throw new Error(`Audio file not found: ${inputPath}`)
 
-  const targetDuration = Number(job.target_duration)
-  if (!targetDuration || isNaN(targetDuration) || targetDuration <= 0) {
+  const audioLoopMode = job.audio_loop_mode === 'repeat_count' ? 'repeat_count' : 'duration'
+  const repeatCount = audioLoopMode === 'repeat_count' ? Math.max(1, parseInt(job.repeat_count, 10) || 1) : null
+  let targetDuration = Number(job.target_duration)
+  if (audioLoopMode !== 'repeat_count' && (!targetDuration || isNaN(targetDuration) || targetDuration <= 0)) {
     throw new Error('Target duration must be greater than zero.')
   }
 
@@ -232,13 +234,30 @@ async function runAudioLoopJob(job, notify, tempFiles, ffmpeg) {
   if (!audioStream || !duration || isNaN(duration) || duration <= 0) {
     throw new Error('Could not detect a valid audio stream duration.')
   }
+  if (audioLoopMode === 'repeat_count') {
+    targetDuration = duration * repeatCount
+  }
+  if (!targetDuration || isNaN(targetDuration) || targetDuration <= 0) {
+    throw new Error('Target duration must be greater than zero.')
+  }
+  await appendLog(job.id, `Resolved output duration: ${targetDuration.toFixed(3)}s`)
 
   const safeBase = path.basename(job.filename || 'looped_audio', path.extname(job.filename || ''))
     .replace(/[<>:"/\\|?*]/g, '_')
   const outputPath = path.join(OUTPUTS_DIR, `${safeBase}_audio_loop_${Date.now()}.mp3`)
 
-  await notify({ target_duration: Math.ceil(targetDuration), encoder_used: 'libmp3lame 320kbps', progress: 5 })
-  await appendLog(job.id, `Source duration: ${duration.toFixed(3)}s. Output duration: ${targetDuration.toFixed(3)}s.`)
+  await notify({
+    target_duration: targetDuration,
+    encoder_used: 'libmp3lame 320kbps',
+    progress: 5,
+    audio_loop_mode: audioLoopMode,
+    repeat_count: repeatCount,
+  })
+  if (audioLoopMode === 'repeat_count') {
+    await appendLog(job.id, `Source duration: ${duration.toFixed(3)}s. Repeat count: ${repeatCount}. Output duration: ${targetDuration.toFixed(3)}s.`)
+  } else {
+    await appendLog(job.id, `Source duration: ${duration.toFixed(3)}s. Output duration: ${targetDuration.toFixed(3)}s.`)
+  }
   await notify({ status: 'processing', progress: 10 })
 
   try {

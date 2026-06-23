@@ -23,12 +23,17 @@ const formatDuration = seconds => {
 const clampPad = (value, max) =>
   String(Math.min(max, Math.max(0, parseInt(value, 10) || 0))).padStart(2, '0')
 
+const clampRepeatCount = value => Math.min(9999, Math.max(1, parseInt(value, 10) || 1))
+
 export default function AudioLoopPage() {
   const [audio, setAudio] = useState(null)
   const [drag, setDrag] = useState(false)
+  const [loopInputMode, setLoopInputMode] = useState('duration')
   const [hours, setHours] = useState('00')
   const [mins, setMins] = useState('10')
   const [secs, setSecs] = useState('00')
+  const [repeatCount, setRepeatCount] = useState(10)
+  const [sourceDuration, setSourceDuration] = useState(null)
   const [outName, setOutName] = useState('')
   const [sysInfo, setSysInfo] = useState(null)
   const [job, setJob] = useState(null)
@@ -40,10 +45,37 @@ export default function AudioLoopPage() {
     (parseInt(hours || '0', 10) * 3600) +
     (parseInt(mins || '0', 10) * 60) +
     (parseInt(secs || '0', 10))
+  const repeatTargetDuration = sourceDuration ? sourceDuration * repeatCount : 0
+  const effectiveTargetDuration = loopInputMode === 'repeat_count' ? repeatTargetDuration : targetDuration
 
   useEffect(() => {
     fetch('/api/system-info').then(r => r.json()).then(setSysInfo).catch(() => setSysInfo(null))
   }, [])
+
+  useEffect(() => {
+    if (!audio) return
+
+    const objectUrl = URL.createObjectURL(audio)
+    const previewAudio = new Audio()
+
+    previewAudio.preload = 'metadata'
+    previewAudio.src = objectUrl
+    previewAudio.onloadedmetadata = () => {
+      setSourceDuration(Number.isFinite(previewAudio.duration) && previewAudio.duration > 0 ? previewAudio.duration : null)
+      URL.revokeObjectURL(objectUrl)
+    }
+    previewAudio.onerror = () => {
+      setSourceDuration(null)
+      URL.revokeObjectURL(objectUrl)
+    }
+
+    return () => {
+      previewAudio.onloadedmetadata = null
+      previewAudio.onerror = null
+      previewAudio.src = ''
+      URL.revokeObjectURL(objectUrl)
+    }
+  }, [audio])
 
   useEffect(() => {
     if (!job?.id || ['completed', 'failed', 'cancelled'].includes(job.status)) return
@@ -59,6 +91,7 @@ export default function AudioLoopPage() {
 
   const chooseAudio = file => {
     setError(null)
+    setSourceDuration(null)
     if (!file) return setAudio(null)
     if (!file.type.startsWith('audio/') && !/\.(mp3|wav|m4a|aac|flac|ogg|opus|wma)$/i.test(file.name)) {
       setAudio(null)
@@ -73,12 +106,18 @@ export default function AudioLoopPage() {
     event.preventDefault()
     setError(null)
     if (!audio) return setError('Select an audio file.')
-    if (targetDuration < 1) return setError('Target duration must be at least 1 second.')
+    if (loopInputMode === 'duration' && targetDuration < 1) return setError('Target duration must be at least 1 second.')
+    if (loopInputMode === 'repeat_count') {
+      if (!sourceDuration || sourceDuration <= 0) return setError('Could not read the source audio duration.')
+      if (!repeatCount || repeatCount < 1) return setError('Repeat count must be at least 1.')
+    }
     setSubmitting(true)
     try {
       const body = new FormData()
       body.append('audio', audio)
-      body.append('target_duration', targetDuration)
+      body.append('target_duration', String(effectiveTargetDuration))
+      body.append('audio_loop_mode', loopInputMode)
+      if (loopInputMode === 'repeat_count') body.append('repeat_count', String(repeatCount))
       body.append('filename', outName || audio.name)
       const response = await fetch('/api/audio-loop-jobs', { method: 'POST', body })
       if (!response.ok) {
@@ -98,11 +137,22 @@ export default function AudioLoopPage() {
     setJob(null)
     setError(null)
     setOutName('')
+    setSourceDuration(null)
     if (inputRef.current) inputRef.current.value = ''
   }
 
   const outputFile = basename(job?.output_path)
   const active = job && !['completed', 'failed', 'cancelled'].includes(job.status)
+  const canSubmit =
+    Boolean(audio) &&
+    !submitting &&
+    sysInfo?.ffmpegInstalled &&
+    sysInfo?.ffprobeInstalled &&
+    (
+      loopInputMode === 'duration'
+        ? effectiveTargetDuration >= 1
+        : Boolean(sourceDuration && repeatCount >= 1)
+    )
 
   return (
     <Layout>
@@ -135,28 +185,96 @@ export default function AudioLoopPage() {
             </div>
 
             <div>
-              <label className="block text-xs font-bold uppercase tracking-wider text-zinc-500 mb-2">Target Duration</label>
-              <div className="grid grid-cols-3 gap-2">
+              <label className="block text-xs font-bold uppercase tracking-wider text-zinc-500 mb-2">Loop Input</label>
+              <div className="grid grid-cols-2 gap-2">
                 {[
-                  ['Hours', hours, setHours, 99],
-                  ['Minutes', mins, setMins, 59],
-                  ['Seconds', secs, setSecs, 59],
-                ].map(([label, value, setValue, max]) => (
-                  <div key={label}>
-                    <span className="block text-xs text-zinc-700 font-mono mb-1">{label}</span>
-                    <input
-                      type="number"
-                      min="0"
-                      max={max}
-                      value={value}
-                      onFocus={event => event.target.select()}
-                      onChange={event => setValue(clampPad(event.target.value, max))}
-                      className="w-full bg-zinc-950 border border-zinc-800 text-center font-mono text-2xl text-white py-2 focus:border-zinc-600 outline-none"
-                    />
-                  </div>
+                  ['duration', 'By Duration', 'Set hours, minutes, and seconds.'],
+                  ['repeat_count', 'By Repeat Count', 'Repeat the full song N times.'],
+                ].map(([mode, label, detail]) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setLoopInputMode(mode)}
+                    className={`border px-4 py-3 text-left transition-colors ${
+                      loopInputMode === mode
+                        ? 'border-white bg-white text-black'
+                        : 'border-zinc-800 bg-zinc-950 text-zinc-300 hover:border-zinc-600'
+                    }`}
+                  >
+                    <span className="block text-xs font-bold uppercase tracking-wider">{label}</span>
+                    <span className={`mt-1 block text-xs font-mono ${loopInputMode === mode ? 'text-zinc-700' : 'text-zinc-600'}`}>{detail}</span>
+                  </button>
                 ))}
               </div>
-              <p className={`mt-2 text-xs font-mono ${targetDuration > 0 ? 'text-zinc-500' : 'text-red-400'}`}>{targetDuration > 0 ? formatDuration(targetDuration) : 'Minimum 1 second'}</p>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold uppercase tracking-wider text-zinc-500 mb-2">Target Duration</label>
+              {loopInputMode === 'duration' ? (
+                <>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      ['Hours', hours, setHours, 99],
+                      ['Minutes', mins, setMins, 59],
+                      ['Seconds', secs, setSecs, 59],
+                    ].map(([label, value, setValue, max]) => (
+                      <div key={label}>
+                        <span className="block text-xs text-zinc-700 font-mono mb-1">{label}</span>
+                        <input
+                          type="number"
+                          min="0"
+                          max={max}
+                          value={value}
+                          onFocus={event => event.target.select()}
+                          onChange={event => setValue(clampPad(event.target.value, max))}
+                          className="w-full bg-zinc-950 border border-zinc-800 text-center font-mono text-2xl text-white py-2 focus:border-zinc-600 outline-none"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                  <p className={`mt-2 text-xs font-mono ${targetDuration > 0 ? 'text-zinc-500' : 'text-red-400'}`}>{targetDuration > 0 ? formatDuration(targetDuration) : 'Minimum 1 second'}</p>
+                </>
+              ) : (
+                <>
+                  <div className="grid grid-cols-5 gap-2">
+                    {[1, 2, 3, 4, 10].map(count => (
+                      <button
+                        key={count}
+                        type="button"
+                        onClick={() => setRepeatCount(count)}
+                        className={`px-3 py-3 text-sm font-mono transition-colors ${
+                          repeatCount === count
+                            ? 'bg-white text-black'
+                            : 'bg-zinc-950 border border-zinc-800 text-zinc-300 hover:border-zinc-600'
+                        }`}
+                      >
+                        {count}x
+                      </button>
+                    ))}
+                  </div>
+                  <div className="mt-3">
+                    <span className="block text-xs text-zinc-700 font-mono mb-1">Repeat Count</span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="9999"
+                      value={repeatCount}
+                      onFocus={event => event.target.select()}
+                      onChange={event => setRepeatCount(clampRepeatCount(event.target.value))}
+                      className="w-full bg-zinc-950 border border-zinc-800 px-3 py-2 text-center font-mono text-2xl text-white outline-none focus:border-zinc-600"
+                    />
+                  </div>
+                  <div className="mt-2 text-xs font-mono">
+                    {sourceDuration ? (
+                      <p className="text-zinc-500">
+                        {formatDuration(sourceDuration)} per play • {repeatCount}x = {formatDuration(repeatTargetDuration)}
+                      </p>
+                    ) : (
+                      <p className="text-zinc-600">Loading source duration...</p>
+                    )}
+                  </div>
+                </>
+              )}
             </div>
 
             {audio && (
@@ -167,11 +285,11 @@ export default function AudioLoopPage() {
             )}
 
             <div className="border border-zinc-900 px-4 py-3 text-xs text-zinc-600">
-              Loop mode: <span className="text-white font-mono">Cyclic wrap crossfade - exact output duration</span>
+              Loop mode: <span className="text-white font-mono">{loopInputMode === 'duration' ? 'Cyclic wrap crossfade - exact output duration' : 'Cyclic wrap crossfade - repeat source track N times'}</span>
             </div>
             {sysInfo && (!sysInfo.ffmpegInstalled || !sysInfo.ffprobeInstalled) && <p className="border border-red-900 bg-red-950/20 px-4 py-3 text-xs text-red-400">FFmpeg and FFprobe are required. Configure them in <Link className="text-white underline" to="/settings">Settings</Link>.</p>}
             {error && <p className="border border-red-900 bg-red-950/20 px-4 py-3 text-xs text-red-400">{error}</p>}
-            <button disabled={!audio || targetDuration < 1 || submitting || !sysInfo?.ffmpegInstalled || !sysInfo?.ffprobeInstalled} className="w-full py-3 text-sm font-bold uppercase tracking-widest bg-white text-black hover:bg-zinc-200 disabled:bg-zinc-900 disabled:text-zinc-700 disabled:cursor-not-allowed">{submitting ? 'Uploading...' : 'Generate Audio Loop'}</button>
+            <button disabled={!canSubmit} className="w-full py-3 text-sm font-bold uppercase tracking-widest bg-white text-black hover:bg-zinc-200 disabled:bg-zinc-900 disabled:text-zinc-700 disabled:cursor-not-allowed">{submitting ? 'Uploading...' : 'Generate Audio Loop'}</button>
           </form>
         ) : (
           <div className="border border-zinc-800 p-6 space-y-5">
@@ -195,8 +313,9 @@ export default function AudioLoopPage() {
             {job.status === 'completed' && (
               <div className="space-y-4">
                 <p className="text-sm text-emerald-400">Looped audio ready.</p>
-                <div className="flex gap-4 text-xs font-mono text-zinc-600">
+                <div className="flex flex-wrap gap-4 text-xs font-mono text-zinc-600">
                   <span>{formatDuration(job.target_duration)}</span>
+                  {job.audio_loop_mode === 'repeat_count' && job.repeat_count ? <span>{job.repeat_count}x repeats</span> : null}
                   <span>{formatBytes(job.output_size)}</span>
                   <span>320kbps MP3</span>
                 </div>

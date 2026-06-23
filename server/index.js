@@ -17,6 +17,17 @@ import {
   getFfprobePath
 } from './hw_detector.js'
 import { startWorker, cancelJob } from './worker.js'
+import {
+  LIVE_ASSETS_DIR,
+  addLiveStudioTracks,
+  clearLiveStudioQueue,
+  clearLiveStudioVideo,
+  getLiveStudioPublicState,
+  moveLiveStudioTrack,
+  removeLiveStudioTrack,
+  setLiveStudioVideo,
+  skipLiveStudioTrack,
+} from './live_studio.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PORT = process.env.PORT || 5000
@@ -41,6 +52,7 @@ let systemInfoPromise = null
 // Serve output files and uploads statically
 app.use('/outputs', express.static(OUTPUTS_DIR))
 app.use('/uploads', express.static(UPLOADS_DIR))
+app.use('/live-assets', express.static(LIVE_ASSETS_DIR))
 
 // Set up storage
 const storage = multer.diskStorage({
@@ -56,6 +68,19 @@ const upload = multer({
   limits: { fileSize: MAX_UPLOAD_BYTES },
 })
 
+const liveAssetStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, LIVE_ASSETS_DIR)
+  },
+  filename: (req, file, cb) => {
+    cb(null, Date.now() + '_' + file.originalname.replace(/[^a-zA-Z0-9.]/g, '_'))
+  }
+})
+const liveAssetUpload = multer({
+  storage: liveAssetStorage,
+  limits: { fileSize: MAX_UPLOAD_BYTES },
+})
+
 function removeUploadedFiles(files) {
   for (const file of files.filter(Boolean)) {
     try { if (fs.existsSync(file.path)) fs.unlinkSync(file.path) } catch { /* best-effort cleanup */ }
@@ -66,6 +91,12 @@ function isAudioFile(file) {
   if (!file) return false
   const ext = path.extname(file.originalname).toLowerCase()
   return file.mimetype.startsWith('audio/') || ['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.opus', '.wma'].includes(ext)
+}
+
+function isVideoFile(file) {
+  if (!file) return false
+  const ext = path.extname(file.originalname).toLowerCase()
+  return file.mimetype.startsWith('video/') || ['.mp4', '.mov', '.webm', '.mkv', '.avi', '.m4v'].includes(ext)
 }
 
 function invalidateSystemInfoCache() {
@@ -102,6 +133,55 @@ function getDiskSpace() {
   })
 }
 
+async function getUploadStorageStats() {
+  if (!fs.existsSync(UPLOADS_DIR)) {
+    return { fileCount: 0, totalBytes: 0 }
+  }
+
+  const entries = await fs.promises.readdir(UPLOADS_DIR, { withFileTypes: true })
+  let fileCount = 0
+  let totalBytes = 0
+
+  for (const entry of entries) {
+    if (!entry.isFile()) continue
+    const filePath = path.join(UPLOADS_DIR, entry.name)
+    try {
+      const stats = await fs.promises.stat(filePath)
+      if (!stats.isFile()) continue
+      fileCount += 1
+      totalBytes += stats.size
+    } catch {
+      // Ignore files that disappear during scan.
+    }
+  }
+
+  return { fileCount, totalBytes }
+}
+
+function probeMedia(filePath) {
+  const ffprobe = getFfprobePath()
+  return new Promise((resolve, reject) => {
+    exec(
+      `"${ffprobe}" -v quiet -print_format json -show_streams -show_format "${filePath}"`,
+      { maxBuffer: 10 * 1024 * 1024 },
+      (err, stdout) => {
+        if (err) return reject(err)
+        try {
+          resolve(JSON.parse(stdout))
+        } catch (parseErr) {
+          reject(parseErr)
+        }
+      }
+    )
+  })
+}
+
+function getDurationFromProbe(probeData, streamType) {
+  const stream = probeData.streams?.find(entry => entry.codec_type === streamType)
+  const duration = parseFloat(probeData.format?.duration || stream?.duration || 0)
+  return { stream, duration }
+}
+
 // WebSocket setup
 const server = http.createServer(app)
 const wss = new WebSocketServer({ server })
@@ -109,20 +189,39 @@ const clients = new Set()
 
 wss.on('connection', (ws) => {
   clients.add(ws)
+  try {
+    ws.send(JSON.stringify({ type: 'live_state', state: getLiveStudioPublicState() }))
+  } catch {
+    // Ignore initial push failures.
+  }
   ws.on('close', () => clients.delete(ws))
   ws.on('error', () => clients.delete(ws))
 })
 
+function broadcastMessage(payload) {
+  const msg = JSON.stringify(payload)
+  for (const client of clients) {
+    try {
+      if (client.readyState === 1) client.send(msg)
+    } catch {
+      // Ignore disconnected clients.
+    }
+  }
+}
+
 function broadcastJobUpdate(jobId) {
   getJobById(jobId).then(job => {
     if (!job) return
-    const msg = JSON.stringify({ type: 'job_update', job })
-    for (const client of clients) {
-      try {
-        if (client.readyState === 1) client.send(msg) // 1 = OPEN
-      } catch { /* ignore disconnected clients */ }
-    }
+    broadcastMessage({ type: 'job_update', job })
   }).catch(err => console.error('Broadcast error:', err))
+}
+
+function broadcastLiveState() {
+  try {
+    broadcastMessage({ type: 'live_state', state: getLiveStudioPublicState() })
+  } catch (err) {
+    console.error('Live state broadcast error:', err)
+  }
 }
 
 async function loadSystemInfo() {
@@ -137,12 +236,14 @@ async function loadSystemInfo() {
     checkFfprobeInstalled(),
     detectGPUEncoders(),
     getDiskSpace(),
-  ]).then(([ffmpegInstalled, ffprobeInstalled, gpuEncoders, diskSpace]) => {
+    getUploadStorageStats(),
+  ]).then(([ffmpegInstalled, ffprobeInstalled, gpuEncoders, diskSpace, uploadStats]) => {
     systemInfoCache = {
       ffmpegInstalled,
       ffprobeInstalled,
       gpuEncoders,
       diskSpace,
+      uploadStats,
       ffmpegPath: getFfmpegPath(),
       ffprobePath: getFfprobePath()
     }
@@ -341,8 +442,16 @@ app.post('/api/audio-loop-jobs', upload.single('audio'), async (req, res) => {
       return res.status(400).json({ error: 'Unsupported format. Upload a valid audio file.' })
     }
 
-    const targetDuration = parseInt(req.body.target_duration, 10)
-    if (!targetDuration || isNaN(targetDuration) || targetDuration < 1) {
+    const audioLoopMode = req.body.audio_loop_mode === 'repeat_count' ? 'repeat_count' : 'duration'
+    const repeatCount = audioLoopMode === 'repeat_count' ? parseInt(req.body.repeat_count, 10) : null
+    const targetDuration = Number(req.body.target_duration)
+
+    if (audioLoopMode === 'repeat_count') {
+      if (!repeatCount || isNaN(repeatCount) || repeatCount < 1) {
+        removeUploadedFiles([audioFile])
+        return res.status(400).json({ error: 'Repeat count must be at least 1.' })
+      }
+    } else if (!targetDuration || isNaN(targetDuration) || targetDuration < 1) {
       removeUploadedFiles([audioFile])
       return res.status(400).json({ error: 'Target duration must be at least 1 second.' })
     }
@@ -353,9 +462,11 @@ app.post('/api/audio-loop-jobs', upload.single('audio'), async (req, res) => {
       filename: req.body.filename || audioFile.originalname,
       input_video_path: null,
       input_audio_path: audioFile.path,
-      target_duration: targetDuration,
+      target_duration: audioLoopMode === 'repeat_count' && (!targetDuration || isNaN(targetDuration)) ? 0 : targetDuration,
       status: 'pending',
       job_type: 'audio_loop',
+      audio_loop_mode: audioLoopMode,
+      repeat_count: repeatCount,
     })
 
     res.status(201).json(job)
@@ -430,6 +541,8 @@ app.post('/api/jobs/:id/duplicate', async (req, res) => {
       job_type: job.job_type || 'loop',
       visual_type: job.visual_type || 'video',
       animation_mode: job.animation_mode || 'loop',
+      audio_loop_mode: job.audio_loop_mode || 'duration',
+      repeat_count: job.repeat_count || null,
     })
 
     res.json(duplicated)
@@ -540,11 +653,178 @@ app.get('/api/system-info', async (req, res) => {
   }
 })
 
+app.get('/api/live-studio/state', (req, res) => {
+  try {
+    res.json(getLiveStudioPublicState())
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.post('/api/live-studio/video', liveAssetUpload.single('video'), async (req, res) => {
+  const videoFile = req.file
+  try {
+    if (!videoFile) {
+      return res.status(400).json({ error: 'A looping video file is required.' })
+    }
+    if (!isVideoFile(videoFile)) {
+      removeUploadedFiles([videoFile])
+      return res.status(400).json({ error: 'Unsupported format. Upload a valid video file.' })
+    }
+
+    const probeData = await probeMedia(videoFile.path)
+    const { stream, duration } = getDurationFromProbe(probeData, 'video')
+    if (!stream || !duration || Number.isNaN(duration) || duration <= 0) {
+      removeUploadedFiles([videoFile])
+      return res.status(400).json({ error: 'Could not detect a valid looping video.' })
+    }
+
+    setLiveStudioVideo(videoFile, duration)
+    const state = getLiveStudioPublicState()
+    broadcastLiveState()
+    res.status(201).json(state)
+  } catch (err) {
+    removeUploadedFiles([videoFile])
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.delete('/api/live-studio/video', (req, res) => {
+  try {
+    clearLiveStudioVideo()
+    const state = getLiveStudioPublicState()
+    broadcastLiveState()
+    res.json(state)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.post('/api/live-studio/tracks', liveAssetUpload.array('audio'), async (req, res) => {
+  const audioFiles = Array.isArray(req.files) ? req.files : []
+  try {
+    if (audioFiles.length === 0) {
+      return res.status(400).json({ error: 'At least one audio track is required.' })
+    }
+    if (audioFiles.some(file => !isAudioFile(file))) {
+      removeUploadedFiles(audioFiles)
+      return res.status(400).json({ error: 'Unsupported format. Upload valid audio files.' })
+    }
+
+    const filesWithDuration = []
+    for (const file of audioFiles) {
+      const probeData = await probeMedia(file.path)
+      const { stream, duration } = getDurationFromProbe(probeData, 'audio')
+      if (!stream || !duration || Number.isNaN(duration) || duration <= 0) {
+        removeUploadedFiles(audioFiles)
+        return res.status(400).json({ error: `Could not detect a valid audio duration for ${file.originalname}.` })
+      }
+      filesWithDuration.push({ ...file, durationSec: duration })
+    }
+
+    addLiveStudioTracks(filesWithDuration)
+    const state = getLiveStudioPublicState()
+    broadcastLiveState()
+    res.status(201).json(state)
+  } catch (err) {
+    removeUploadedFiles(audioFiles)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.post('/api/live-studio/tracks/:id/move', (req, res) => {
+  try {
+    const direction = req.body?.direction === 'up' ? 'up' : req.body?.direction === 'down' ? 'down' : null
+    if (!direction) {
+      return res.status(400).json({ error: 'direction must be "up" or "down".' })
+    }
+
+    moveLiveStudioTrack(req.params.id, direction)
+    const state = getLiveStudioPublicState()
+    broadcastLiveState()
+    res.json(state)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.delete('/api/live-studio/tracks/:id', (req, res) => {
+  try {
+    removeLiveStudioTrack(req.params.id)
+    const state = getLiveStudioPublicState()
+    broadcastLiveState()
+    res.json(state)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.post('/api/live-studio/skip', (req, res) => {
+  try {
+    skipLiveStudioTrack()
+    const state = getLiveStudioPublicState()
+    broadcastLiveState()
+    res.json(state)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.post('/api/live-studio/clear-queue', (req, res) => {
+  try {
+    clearLiveStudioQueue()
+    const state = getLiveStudioPublicState()
+    broadcastLiveState()
+    res.json(state)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 app.post('/api/settings/ffmpeg', (req, res) => {
   const { customFfmpeg, customFfprobe } = req.body
   setFfmpegPaths(customFfmpeg, customFfprobe)
   invalidateSystemInfoCache()
   res.json({ success: true })
+})
+
+app.delete('/api/settings/uploads', async (req, res) => {
+  try {
+    const jobs = await getJobs()
+    const activeJob = jobs.find(job => ['pending', 'preparing', 'processing', 'finalizing'].includes(job.status))
+    if (activeJob) {
+      return res.status(409).json({ error: 'Cannot delete uploads while jobs are queued or processing.' })
+    }
+
+    if (!fs.existsSync(UPLOADS_DIR)) {
+      invalidateSystemInfoCache()
+      return res.json({ success: true, deletedCount: 0, freedBytes: 0, errors: [] })
+    }
+
+    const entries = await fs.promises.readdir(UPLOADS_DIR, { withFileTypes: true })
+    let deletedCount = 0
+    let freedBytes = 0
+    const errors = []
+
+    for (const entry of entries) {
+      if (!entry.isFile()) continue
+      const filePath = path.join(UPLOADS_DIR, entry.name)
+      try {
+        const stats = await fs.promises.stat(filePath)
+        if (!stats.isFile()) continue
+        await fs.promises.unlink(filePath)
+        deletedCount += 1
+        freedBytes += stats.size
+      } catch (err) {
+        errors.push({ file: entry.name, error: err.message })
+      }
+    }
+
+    invalidateSystemInfoCache()
+    res.json({ success: true, deletedCount, freedBytes, errors })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
 })
 
 app.post('/api/probe', upload.single('video'), async (req, res) => {

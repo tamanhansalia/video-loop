@@ -17,6 +17,10 @@ export default defineConfig({
       '/uploads': {
         target: 'http://localhost:5000',
         changeOrigin: true,
+      },
+      '/live-assets': {
+        target: 'http://localhost:5000',
+        changeOrigin: true,
       }
     }
   }

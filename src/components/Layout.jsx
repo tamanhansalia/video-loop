@@ -23,6 +23,7 @@ export default function Layout({ children }) {
               ['/mp4-to-mp3', 'MP4 to MP3', false],
               ['/audio-merge', 'Audio Merger', false],
               ['/audio-loop', 'Audio Looper', false],
+              ['/live-control', 'Live Studio', false],
               ['/history', 'History', false],
               ['/settings', 'Settings', false],
             ].map(([to, label, exact]) => (
