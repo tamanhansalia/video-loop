@@ -35,18 +35,26 @@ const formatDuration = seconds => {
 const formatDate = value => {
   if (!value) return 'Unknown time'
   return new Date(value).toLocaleString('en-US', {
-    month: 'short', day: 'numeric', year: 'numeric',
-    hour: '2-digit', minute: '2-digit',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
   })
 }
 
 const getTool = job => {
   if (job.job_type === 'mp4_to_mp3') return { category: 'mp3', label: 'MP4 to MP3 Converter', detail: 'Audio extraction · CBR 320kbps' }
   if (job.job_type === 'audio_merge') return { category: 'audio_merge', label: 'Audio Merger', detail: 'Sequential audio merge · CBR 320kbps' }
-  if (job.job_type === 'audio_loop') return { category: 'audio_loop', label: 'Audio Looper', detail: 'Smooth cyclic audio loop · CBR 320kbps' }
   if (job.job_type === 'audio_loop') {
     const modeDetail = job.audio_loop_mode === 'repeat_count' && job.repeat_count ? `${job.repeat_count}x repeats` : 'Exact duration'
     return { category: 'audio_loop', label: 'Audio Looper', detail: `Smooth cyclic audio loop · ${modeDetail} · CBR 320kbps` }
+  }
+  if (job.job_type === 'waveform_visual') {
+    const background = job.visual_type === 'image' ? 'Image Background'
+      : job.visual_type === 'video' ? 'Video Background'
+      : 'Solid Background'
+    return { category: 'waveform_visual', label: 'Waveform Visualizer', detail: `${background} · Glowing waveform overlay` }
   }
   if (job.job_type === 'audio_visual') {
     const visual = job.visual_type === 'image' ? 'Image' : 'Video'
@@ -131,6 +139,7 @@ export default function HistoryPage() {
               ['loop', 'Loop'],
               ['reverse', 'Reverse'],
               ['audio_visual', 'Audio Visual'],
+              ['waveform_visual', 'Waveform Visual'],
               ['mp3', 'MP4 to MP3'],
               ['audio_merge', 'Audio Merger'],
               ['audio_loop', 'Audio Looper'],

@@ -100,6 +100,17 @@ export default function HomePage() {
             </p>
           </button>
 
+          <button
+            onClick={() => navigate('/waveform-visual')}
+            className="border border-zinc-900 p-8 cursor-pointer hover:border-zinc-700 hover:bg-zinc-950 transition-colors w-full text-left"
+          >
+            <p className="text-2xl font-mono text-zinc-700 mb-4">~ ~ ~ ~</p>
+            <p className="text-sm font-bold uppercase tracking-wider text-white">Waveform Visual</p>
+            <p className="text-xs text-zinc-600 mt-2 leading-relaxed">
+              Create glowing draggable waveform overlays and render them into a finished MP4
+            </p>
+          </button>
+
           {/* Reverse Video */}
           <button
             onClick={() => navigate('/reverse')}

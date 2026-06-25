@@ -20,6 +20,7 @@ export default function Layout({ children }) {
               ['/loop', 'Loop', false],
               ['/reverse', 'Reverse Video', false],
               ['/audio-visual', 'Audio Visual', false],
+              ['/waveform-visual', 'Waveform Visual', false],
               ['/mp4-to-mp3', 'MP4 to MP3', false],
               ['/audio-merge', 'Audio Merger', false],
               ['/audio-loop', 'Audio Looper', false],

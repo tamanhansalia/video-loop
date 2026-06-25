@@ -4,6 +4,7 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import { getFfmpegPath, getFfprobePath, getBestEncoder } from './hw_detector.js'
 import { updateJob, appendLog, getJobById, getJobs } from './db.js'
+import { getFrameDimensions, sanitizeWaveformVisualConfig, toFfmpegHexColor } from '../src/lib/waveformVisual.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const TEMP_DIR = path.join(__dirname, '../data/temp')
@@ -138,6 +139,39 @@ function progressUpdates(prog, targetSec) {
     updates.eta = Math.max(0, Math.round((targetSec - prog.timeSec) / prog.speed))
   }
   return updates
+}
+
+function pickNamedWaveColor(hex) {
+  const palette = [
+    { name: 'gold', rgb: [246, 211, 101] },
+    { name: 'orange', rgb: [253, 160, 133] },
+    { name: 'deepskyblue', rgb: [96, 165, 250] },
+    { name: 'springgreen', rgb: [52, 211, 153] },
+    { name: 'hotpink', rgb: [244, 114, 182] },
+    { name: 'white', rgb: [255, 255, 255] },
+  ]
+  const normalized = (hex || '#ffffff').replace('#', '')
+  const safe = normalized.length === 6 ? normalized : 'ffffff'
+  const target = [
+    parseInt(safe.slice(0, 2), 16),
+    parseInt(safe.slice(2, 4), 16),
+    parseInt(safe.slice(4, 6), 16),
+  ]
+
+  let best = palette[0]
+  let bestDistance = Infinity
+  for (const entry of palette) {
+    const distance = (
+      (entry.rgb[0] - target[0]) ** 2
+      + (entry.rgb[1] - target[1]) ** 2
+      + (entry.rgb[2] - target[2]) ** 2
+    )
+    if (distance < bestDistance) {
+      bestDistance = distance
+      best = entry
+    }
+  }
+  return best.name
 }
 
 function parseAudioPathList(value) {
@@ -440,6 +474,199 @@ async function runAudioVisualJob(job, notify, tempFiles, ffmpeg) {
   await appendLog(job.id, `=== COMPLETE: ${path.basename(outputPath)} (${(outputSize / 1024 / 1024).toFixed(1)} MB) ===`)
 }
 
+function buildWaveformFilterGraph({ backgroundType, config, frameWidth, frameHeight, audioDuration }) {
+  const fps = config.fps
+  const boxX = Math.round(config.positionX * frameWidth)
+  const boxY = Math.round(config.positionY * frameHeight)
+  const boxW = Math.max(180, Math.round(config.sizeWidth * frameWidth))
+  const boxH = Math.max(120, Math.round(config.sizeHeight * frameHeight))
+  const waveHeight = Math.max(28, Math.round(boxH * config.amplitude))
+  const baseOffsetY = Math.round((boxH - waveHeight) / 2)
+  const layerGapPx = Math.round(boxH * config.lineGap)
+  const lineCount = Math.max(1, config.lineCount)
+  const bgColor = toFfmpegHexColor(config.backgroundColor)
+  const waveColor = pickNamedWaveColor(config.waveformColor)
+  const filters = []
+  const audioLabels = Array.from({ length: lineCount }, (_, index) => `[aw${index}]`).join('')
+  const imageFilters = {
+    still: `scale=${frameWidth}:${frameHeight}:force_original_aspect_ratio=increase,crop=${frameWidth}:${frameHeight},fps=${fps},format=rgba`,
+    loop: `scale=${Math.max(frameWidth * 4, frameWidth)}:-1,zoompan=z='1.06':x='iw/2-(iw/zoom/2)+(iw-iw/zoom)/2*sin(2*PI*on/(${fps}*10))':y='ih/2-(ih/zoom/2)+(ih-ih/zoom)/2*cos(2*PI*on/(${fps}*10))':d=1:s=${frameWidth}x${frameHeight}:fps=${fps},format=rgba`,
+    pingpong: `scale=${Math.max(frameWidth * 4, frameWidth)}:-1,zoompan=z='1.02+0.06*(1-cos(2*PI*on/(${fps}*8)))/2':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${frameWidth}x${frameHeight}:fps=${fps},format=rgba`,
+  }
+
+  if (backgroundType === 'solid') {
+    filters.push(`[0:v]fps=${fps},format=rgba[basev]`)
+  } else if (backgroundType === 'image') {
+    filters.push(`[0:v]${imageFilters[config.backgroundMode] || imageFilters.loop}[basev]`)
+  } else {
+    filters.push(`[0:v]fps=${fps},scale=${frameWidth}:${frameHeight}:force_original_aspect_ratio=increase,crop=${frameWidth}:${frameHeight},format=rgba[basev]`)
+  }
+
+  filters.push(`[1:a]aformat=channel_layouts=stereo,asplit=${lineCount}${audioLabels}`)
+  filters.push(`color=c=black@0.0:s=${boxW}x${boxH}:r=${fps}:d=${audioDuration.toFixed(3)},format=rgba[wavecanvas0]`)
+
+  for (let index = 0; index < lineCount; index += 1) {
+    const delay = index * config.trailDelayMs
+    const alpha = Math.max(0.08, Number((config.opacity - index * 0.08).toFixed(3)))
+    const offset = baseOffsetY + Math.round((index - (lineCount - 1) / 2) * layerGapPx)
+    const audioPrefix = delay > 0 ? `adelay=${delay}:all=1,` : ''
+    filters.push(
+      `[aw${index}]${audioPrefix}showwaves=s=${boxW}x${waveHeight}:mode=p2p:colors=${waveColor}:scale=sqrt:r=${fps},format=rgba,colorkey=color=black:similarity=0.02:blend=0,colorchannelmixer=aa=${alpha}[wave${index}]`
+    )
+    filters.push(`[wavecanvas${index}][wave${index}]overlay=x=0:y=${offset}:format=auto:shortest=1[wavecanvas${index + 1}]`)
+  }
+
+  if (config.thickness > 1.05) {
+    filters.push(`[wavecanvas${lineCount}]split=2[waveSharpSrc][waveGlowSrc]`)
+    filters.push(`[waveSharpSrc]gblur=sigma=${Math.max(0.6, Number(((config.thickness - 1) * 0.45).toFixed(3)))}[waveSharp]`)
+  } else {
+    filters.push(`[wavecanvas${lineCount}]split=2[waveSharp][waveGlowSrc]`)
+  }
+
+  filters.push(`[waveGlowSrc]gblur=sigma=${config.glowBlur},colorchannelmixer=aa=${config.glowStrength}[waveGlow]`)
+  filters.push(`[waveGlow][waveSharp]overlay=0:0:format=auto[waveComp]`)
+  filters.push(`[basev][waveComp]overlay=x=${boxX}:y=${boxY}:format=auto:shortest=1,format=yuv420p[outv]`)
+
+  return {
+    backgroundColor: bgColor,
+    filterGraph: filters.join(';'),
+    resolution: `${frameWidth}x${frameHeight}`,
+  }
+}
+
+async function runWaveformVisualJob(job, notify, tempFiles, ffmpeg) {
+  const audioPath = job.input_audio_path
+  if (!audioPath || !fs.existsSync(audioPath)) throw new Error(`Audio track not found: ${audioPath}`)
+
+  const config = sanitizeWaveformVisualConfig(job.waveform_config ? JSON.parse(job.waveform_config) : {})
+  const { width: frameWidth, height: frameHeight } = getFrameDimensions(config.framePreset)
+  const audioMeta = await probeFile(audioPath)
+  const { audioStream, duration: audioDuration } = getAudioDurationFromMeta(audioMeta)
+  if (!audioStream || !audioDuration || Number.isNaN(audioDuration) || audioDuration <= 0) {
+    throw new Error('Could not detect a valid audio stream duration.')
+  }
+
+  const safeBase = path.basename(job.filename || 'waveform-visual', path.extname(job.filename || ''))
+    .replace(/[<>:"/\\|?*]/g, '_')
+  const outputPath = path.join(OUTPUTS_DIR, `${safeBase}_waveform_${Date.now()}.mp4`)
+
+  let encoder
+  try {
+    encoder = await getBestEncoder(job.hw_accel)
+  } catch (err) {
+    await appendLog(job.id, `GPU encoder unavailable: ${err.message}. Falling back to libx264.`)
+    encoder = 'libx264'
+  }
+
+  const useSolidBackground = !job.input_video_path || job.visual_type === 'none' || config.backgroundMode === 'solid'
+  let backgroundType = useSolidBackground ? 'solid' : job.visual_type
+  let backgroundPath = job.input_video_path
+
+  if (!useSolidBackground) {
+    if (!backgroundPath || !fs.existsSync(backgroundPath)) throw new Error(`Background asset not found: ${backgroundPath}`)
+
+    if (job.visual_type === 'video' && config.backgroundMode === 'pingpong') {
+      const visualMeta = await probeFile(backgroundPath)
+      const vStream = visualMeta.streams?.find(stream => stream.width > 0 && stream.codec_name)
+      const videoDuration = parseFloat(visualMeta.format?.duration)
+      if (!vStream || !videoDuration || videoDuration <= 0) throw new Error('Could not detect a valid background video stream.')
+      const fps = parseFps(vStream.avg_frame_rate)
+      const frameDuration = 1 / fps
+      if (videoDuration <= frameDuration * 2) throw new Error('Background video is too short for ping-pong mode.')
+
+      const pingPongPath = path.join(TEMP_DIR, `${job.id}_wave_pp.mp4`)
+      tempFiles.push(pingPongPath)
+      const trimEnd = videoDuration - frameDuration
+      const filter = [
+        `[0:v]fps=${fps.toFixed(6)},split=2[fw][bwsrc]`,
+        `[bwsrc]trim=start=${frameDuration.toFixed(6)}:end=${trimEnd.toFixed(6)},setpts=PTS-STARTPTS,reverse[bw]`,
+        '[fw][bw]concat=n=2:v=1:a=0[out]',
+      ].join(';')
+      await appendLog(job.id, 'Building seamless ping-pong background video cycle.')
+      await runCommand(ffmpeg, [
+        '-i', fp(backgroundPath),
+        '-filter_complex', filter,
+        '-map', '[out]',
+        '-an',
+        '-c:v', 'libx264',
+        ...encoderQualityArgs('libx264'),
+        '-pix_fmt', 'yuv420p',
+        '-y',
+        fp(pingPongPath),
+      ], job.id)
+      backgroundPath = pingPongPath
+    }
+  }
+
+  const { backgroundColor, filterGraph, resolution } = buildWaveformFilterGraph({
+    backgroundType,
+    config,
+    frameWidth,
+    frameHeight,
+    audioDuration,
+  })
+
+  const inputArgs = useSolidBackground
+    ? ['-f', 'lavfi', '-i', `color=c=${backgroundColor}:s=${frameWidth}x${frameHeight}:r=${config.fps}:d=${audioDuration.toFixed(3)}`]
+    : job.visual_type === 'image'
+      ? ['-loop', '1', '-framerate', String(config.fps), '-i', fp(backgroundPath)]
+      : ['-stream_loop', '-1', '-i', fp(backgroundPath)]
+
+  await notify({
+    target_duration: Math.ceil(audioDuration),
+    encoder_used: encoder,
+    resolution,
+    progress: 5,
+  })
+  await appendLog(job.id, `Waveform visual render: ${resolution}, ${config.lineCount} lines, ${config.backgroundMode} background mode`)
+  await appendLog(job.id, `Audio duration: ${audioDuration.toFixed(3)}s. Wave box ${(config.sizeWidth * 100).toFixed(1)}% x ${(config.sizeHeight * 100).toFixed(1)}% at ${(config.positionX * 100).toFixed(1)}%, ${(config.positionY * 100).toFixed(1)}%.`)
+
+  await notify({ status: 'processing', progress: 10 })
+  const render = selectedEncoder => runCommand(ffmpeg, [
+    ...inputArgs,
+    '-i', fp(audioPath),
+    '-filter_complex', filterGraph,
+    '-map', '[outv]',
+    '-map', '1:a',
+    '-c:v', selectedEncoder,
+    ...encoderQualityArgs(selectedEncoder),
+    '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac',
+    '-b:a', '192k',
+    '-ar', '48000',
+    '-t', String(audioDuration),
+    '-movflags', '+faststart',
+    '-y',
+    fp(outputPath),
+  ], job.id, prog => {
+    const updates = progressUpdates(prog, audioDuration)
+    if (Object.keys(updates).length) notify(updates)
+  })
+
+  try {
+    await render(encoder)
+  } catch (err) {
+    if (encoder === 'libx264') throw err
+    try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath) } catch { /* best-effort cleanup */ }
+    encoder = 'libx264'
+    await notify({ encoder_used: encoder, progress: 10 })
+    await appendLog(job.id, `Hardware render failed: ${err.message}. Retrying with libx264.`)
+    await render(encoder)
+  }
+
+  if (!fs.existsSync(outputPath)) throw new Error('Waveform visual output file was not created.')
+  const outputSize = fs.statSync(outputPath).size
+  await notify({
+    status: 'completed',
+    progress: 100,
+    fps: 0,
+    eta: 0,
+    output_size: outputSize,
+    output_path: outputPath,
+  })
+  await appendLog(job.id, `=== COMPLETE: ${path.basename(outputPath)} (${(outputSize / 1024 / 1024).toFixed(1)} MB) ===`)
+}
+
 async function runMp4ToMp3Job(job, notify, ffmpeg) {
   const inputPath = job.input_video_path
   if (!fs.existsSync(inputPath)) throw new Error(`Input MP4 file not found: ${inputPath}`)
@@ -546,6 +773,10 @@ async function runRenderJob(job) {
   try {
     if (job.job_type === 'audio_visual') {
       await runAudioVisualJob(job, notify, tempFiles, ffmpeg)
+      return
+    }
+    if (job.job_type === 'waveform_visual') {
+      await runWaveformVisualJob(job, notify, tempFiles, ffmpeg)
       return
     }
     if (job.job_type === 'mp4_to_mp3') {

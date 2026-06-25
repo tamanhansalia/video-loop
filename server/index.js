@@ -28,6 +28,7 @@ import {
   setLiveStudioVideo,
   skipLiveStudioTrack,
 } from './live_studio.js'
+import { sanitizeWaveformVisualConfig } from '../src/lib/waveformVisual.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PORT = process.env.PORT || 5000
@@ -97,6 +98,12 @@ function isVideoFile(file) {
   if (!file) return false
   const ext = path.extname(file.originalname).toLowerCase()
   return file.mimetype.startsWith('video/') || ['.mp4', '.mov', '.webm', '.mkv', '.avi', '.m4v'].includes(ext)
+}
+
+function isImageFile(file) {
+  if (!file) return false
+  const ext = path.extname(file.originalname).toLowerCase()
+  return file.mimetype.startsWith('image/') || ['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif'].includes(ext)
 }
 
 function invalidateSystemInfoCache() {
@@ -477,6 +484,59 @@ app.post('/api/audio-loop-jobs', upload.single('audio'), async (req, res) => {
   }
 })
 
+app.post('/api/waveform-visual-jobs', upload.fields([
+  { name: 'background', maxCount: 1 },
+  { name: 'audio', maxCount: 1 }
+]), async (req, res) => {
+  const backgroundFile = req.files?.['background'] ? req.files['background'][0] : null
+  const audioFile = req.files?.['audio'] ? req.files['audio'][0] : null
+
+  try {
+    if (!audioFile) {
+      removeUploadedFiles([backgroundFile, audioFile])
+      return res.status(400).json({ error: 'An audio track is required.' })
+    }
+    if (!isAudioFile(audioFile)) {
+      removeUploadedFiles([backgroundFile, audioFile])
+      return res.status(400).json({ error: 'Unsupported audio file.' })
+    }
+    if (backgroundFile && !isImageFile(backgroundFile) && !isVideoFile(backgroundFile)) {
+      removeUploadedFiles([backgroundFile, audioFile])
+      return res.status(400).json({ error: 'Background asset must be an image or video file.' })
+    }
+
+    let waveformConfig
+    try {
+      waveformConfig = sanitizeWaveformVisualConfig(JSON.parse(req.body.waveform_config || '{}'))
+    } catch {
+      removeUploadedFiles([backgroundFile, audioFile])
+      return res.status(400).json({ error: 'Waveform settings payload is invalid.' })
+    }
+
+    const visualType = backgroundFile ? (isImageFile(backgroundFile) ? 'image' : 'video') : 'none'
+    const id = Date.now().toString(36) + Math.random().toString(36).substr(2, 5)
+    const job = await createJob({
+      id,
+      filename: req.body.filename || 'waveform-visual.mp4',
+      input_video_path: backgroundFile?.path || null,
+      input_audio_path: audioFile.path,
+      target_duration: 0,
+      hw_accel: req.body.hw_accel || 'auto',
+      status: 'pending',
+      job_type: 'waveform_visual',
+      visual_type: visualType,
+      animation_mode: waveformConfig.backgroundMode,
+      waveform_config: JSON.stringify(waveformConfig),
+    })
+
+    res.status(201).json(job)
+    startWorker(broadcastJobUpdate)
+  } catch (err) {
+    removeUploadedFiles([backgroundFile, audioFile])
+    res.status(500).json({ error: err.message })
+  }
+})
+
 app.post('/api/jobs/:id/cancel', async (req, res) => {
   try {
     const cancelled = await cancelJob(req.params.id)
@@ -543,6 +603,7 @@ app.post('/api/jobs/:id/duplicate', async (req, res) => {
       animation_mode: job.animation_mode || 'loop',
       audio_loop_mode: job.audio_loop_mode || 'duration',
       repeat_count: job.repeat_count || null,
+      waveform_config: job.waveform_config || null,
     })
 
     res.json(duplicated)

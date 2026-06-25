@@ -11,6 +11,7 @@ import AudioLoopPage from './pages/AudioLoopPage'
 import HistoryPage from './pages/HistoryPage'
 import LiveControlPage from './pages/LiveControlPage'
 import LivePage from './pages/LivePage'
+import WaveformVisualPage from './pages/WaveformVisualPage'
 
 export default function App() {
   return (
@@ -25,6 +26,7 @@ export default function App() {
           <Route path="/mp4-to-mp3" element={<Mp4ToMp3Page />} />
           <Route path="/audio-merge" element={<AudioMergePage />} />
           <Route path="/audio-loop" element={<AudioLoopPage />} />
+          <Route path="/waveform-visual" element={<WaveformVisualPage />} />
           <Route path="/live-control" element={<LiveControlPage />} />
           <Route path="/live" element={<LivePage />} />
           <Route path="/history" element={<HistoryPage />} />

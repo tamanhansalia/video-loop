@@ -12,13 +12,42 @@ const formatBytes = bytes => {
 }
 
 const formatDuration = seconds => {
-  if (!seconds || Number.isNaN(Number(seconds))) return '--'
+  if (seconds == null || Number.isNaN(Number(seconds))) return '--'
   const value = Number(seconds)
   const h = Math.floor(value / 3600)
   const m = Math.floor((value % 3600) / 60)
   const s = Math.floor(value % 60)
   return h ? `${h}h ${m}m ${s}s` : m ? `${m}m ${s}s` : `${s}s`
 }
+
+const readAudioDuration = file => new Promise(resolve => {
+  const url = URL.createObjectURL(file)
+  const audio = document.createElement('audio')
+
+  const cleanup = () => {
+    audio.removeEventListener('loadedmetadata', handleLoadedMetadata)
+    audio.removeEventListener('error', handleError)
+    URL.revokeObjectURL(url)
+  }
+
+  const handleLoadedMetadata = () => {
+    const duration = Number(audio.duration)
+    cleanup()
+    resolve(Number.isFinite(duration) && duration >= 0 ? duration : null)
+  }
+
+  const handleError = () => {
+    cleanup()
+    resolve(null)
+  }
+
+  audio.preload = 'metadata'
+  audio.addEventListener('loadedmetadata', handleLoadedMetadata)
+  audio.addEventListener('error', handleError)
+  audio.src = url
+})
+
+const getFilesKey = files => files.map(file => `${file.name}:${file.size}:${file.lastModified}`).join('|')
 
 export default function AudioMergePage() {
   const [files, setFiles] = useState([])
@@ -28,6 +57,7 @@ export default function AudioMergePage() {
   const [job, setJob] = useState(null)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState(null)
+  const [durationSnapshot, setDurationSnapshot] = useState({ key: '', durations: [] })
   const inputRef = useRef(null)
 
   useEffect(() => {
@@ -45,6 +75,23 @@ export default function AudioMergePage() {
     const interval = setInterval(refresh, 1000)
     return () => clearInterval(interval)
   }, [job])
+
+  useEffect(() => {
+    let cancelled = false
+
+    if (!files.length) return undefined
+
+    const snapshotKey = getFilesKey(files)
+
+    Promise.all(files.map(readAudioDuration)).then(durations => {
+      if (cancelled) return
+      setDurationSnapshot({ key: snapshotKey, durations })
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [files])
 
   const addFiles = selected => {
     setError(null)
@@ -105,6 +152,15 @@ export default function AudioMergePage() {
 
   const outputFile = basename(job?.output_path)
   const active = job && !['completed', 'failed', 'cancelled'].includes(job.status)
+  const filesKey = getFilesKey(files)
+  const durationsReady = files.length > 0 && durationSnapshot.key === filesKey && durationSnapshot.durations.length === files.length
+  const totalSelectedSize = files.reduce((sum, file) => sum + (file.size || 0), 0)
+  const totalSelectedDuration = durationsReady
+    ? durationSnapshot.durations.reduce((sum, duration) => sum + (duration || 0), 0)
+    : null
+  const unreadableDurationCount = durationsReady
+    ? durationSnapshot.durations.filter(duration => duration == null).length
+    : 0
 
   return (
     <Layout>
@@ -130,19 +186,38 @@ export default function AudioMergePage() {
             </div>
 
             {files.length > 0 && (
-              <div className="border border-zinc-900 divide-y divide-zinc-900">
-                {files.map((file, index) => (
-                  <div key={`${file.name}-${file.size}-${index}`} className="flex items-center gap-3 px-3 py-2">
-                    <span className="w-7 text-xs font-mono text-zinc-700">{String(index + 1).padStart(2, '0')}</span>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm text-white truncate">{file.name}</p>
-                      <p className="text-xs text-zinc-700 font-mono mt-0.5">{formatBytes(file.size)}</p>
+              <div className="space-y-3">
+                <div className="border border-zinc-900 divide-y divide-zinc-900">
+                  {files.map((file, index) => (
+                    <div key={`${file.name}-${file.size}-${index}`} className="flex items-center gap-3 px-3 py-2">
+                      <span className="w-7 text-xs font-mono text-zinc-700">{String(index + 1).padStart(2, '0')}</span>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm text-white truncate">{file.name}</p>
+                        <p className="text-xs text-zinc-700 font-mono mt-0.5">
+                          {formatBytes(file.size)} | {durationsReady ? formatDuration(durationSnapshot.durations[index]) : 'Calculating...'}
+                        </p>
+                      </div>
+                      <button type="button" onClick={() => moveFile(index, -1)} disabled={index === 0} className="text-xs text-zinc-600 hover:text-white disabled:opacity-20">Up</button>
+                      <button type="button" onClick={() => moveFile(index, 1)} disabled={index === files.length - 1} className="text-xs text-zinc-600 hover:text-white disabled:opacity-20">Down</button>
+                      <button type="button" onClick={() => removeFile(index)} className="text-zinc-700 hover:text-white text-xl leading-none">x</button>
                     </div>
-                    <button type="button" onClick={() => moveFile(index, -1)} disabled={index === 0} className="text-xs text-zinc-600 hover:text-white disabled:opacity-20">Up</button>
-                    <button type="button" onClick={() => moveFile(index, 1)} disabled={index === files.length - 1} className="text-xs text-zinc-600 hover:text-white disabled:opacity-20">Down</button>
-                    <button type="button" onClick={() => removeFile(index)} className="text-zinc-700 hover:text-white text-xl leading-none">x</button>
+                  ))}
+                </div>
+
+                <div className="border border-zinc-900 bg-zinc-950 px-4 py-3">
+                  <div className="flex flex-wrap gap-4 text-xs font-mono text-zinc-600">
+                    <span>{files.length} file{files.length === 1 ? '' : 's'}</span>
+                    <span>{formatBytes(totalSelectedSize)}</span>
+                    <span className="text-white">
+                      {durationsReady ? formatDuration(totalSelectedDuration) : 'Calculating total duration...'}
+                    </span>
                   </div>
-                ))}
+                  {unreadableDurationCount > 0 && (
+                    <p className="mt-2 text-[11px] text-amber-400">
+                      Duration could not be read for {unreadableDurationCount} file{unreadableDurationCount === 1 ? '' : 's'}.
+                    </p>
+                  )}
+                </div>
               </div>
             )}
 
