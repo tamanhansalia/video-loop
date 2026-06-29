@@ -32,7 +32,13 @@ const STATUS_LABELS = {
 
 export default function YtLivePage() {
   const [state, setState] = useState(null)
-  const [keyInput, setKeyInput] = useState('')
+  const [keyInput, setKeyInput] = useState(() => {
+    try {
+      return localStorage.getItem('yt_stream_key') || ''
+    } catch {
+      return ''
+    }
+  })
   const [keyVisible, setKeyVisible] = useState(false)
   const [notice, setNotice] = useState(null)
   const [uploading, setUploading] = useState({ audio: false, bg: false })
@@ -112,7 +118,6 @@ export default function YtLivePage() {
       try {
         localStorage.setItem('yt_stream_key', keyInput.trim())
       } catch { /* ignore security/quota errors */ }
-      setKeyInput('')
       setKeyVisible(false)
       showNotice('Stream key saved.', 'success')
     } catch (err) { showNotice(err.message, 'error') }
