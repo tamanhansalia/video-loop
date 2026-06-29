@@ -958,6 +958,9 @@ app.get('/api/yt-live/status', (req, res) => {
 })
 
 app.post('/api/yt-live/stream-key', (req, res) => {
+  if (getYtLiveStatus().status !== 'offline') {
+    return res.status(409).json({ error: 'Cannot modify stream key while stream is active.' })
+  }
   const { streamKey } = req.body
   if (!streamKey || typeof streamKey !== 'string') {
     return res.status(400).json({ error: 'Stream key is required.' })
@@ -966,9 +969,21 @@ app.post('/api/yt-live/stream-key', (req, res) => {
   res.json({ success: true })
 })
 
+app.delete('/api/yt-live/stream-key', (req, res) => {
+  if (getYtLiveStatus().status !== 'offline') {
+    return res.status(409).json({ error: 'Cannot remove stream key while stream is active.' })
+  }
+  setYtStreamKey('')
+  res.json({ success: true })
+})
+
 app.post('/api/yt-live/audio', ytLiveUpload.array('audio'), async (req, res) => {
   const files = req.files || []
   try {
+    if (getYtLiveStatus().status !== 'offline') {
+      removeUploadedFiles(files)
+      return res.status(409).json({ error: 'Cannot add audio tracks while stream is active.' })
+    }
     if (files.length === 0) return res.status(400).json({ error: 'At least one audio file is required.' })
     const invalid = files.find(f => !isAudioFile(f))
     if (invalid) {
@@ -990,6 +1005,9 @@ app.post('/api/yt-live/audio', ytLiveUpload.array('audio'), async (req, res) => 
 })
 
 app.delete('/api/yt-live/audio/:id', (req, res) => {
+  if (getYtLiveStatus().status !== 'offline') {
+    return res.status(409).json({ error: 'Cannot remove audio tracks while stream is active.' })
+  }
   const removed = removeYtAudioFile(req.params.id)
   if (!removed) return res.status(404).json({ error: 'Track not found.' })
   res.json(getYtLiveStatus())
@@ -998,6 +1016,10 @@ app.delete('/api/yt-live/audio/:id', (req, res) => {
 app.post('/api/yt-live/background', ytLiveUpload.single('background'), async (req, res) => {
   const file = req.file
   try {
+    if (getYtLiveStatus().status !== 'offline') {
+      if (file) removeUploadedFiles([file])
+      return res.status(409).json({ error: 'Cannot modify background while stream is active.' })
+    }
     if (!file) return res.status(400).json({ error: 'A background file is required.' })
     if (!isImageFile(file) && !isVideoFile(file)) {
       removeUploadedFiles([file])
@@ -1006,12 +1028,15 @@ app.post('/api/yt-live/background', ytLiveUpload.single('background'), async (re
     setYtBackground(file, isImageFile(file) ? 'image' : 'video')
     res.status(201).json(getYtLiveStatus())
   } catch (err) {
-    removeUploadedFiles([file])
+    if (file) removeUploadedFiles([file])
     res.status(500).json({ error: err.message })
   }
 })
 
 app.delete('/api/yt-live/background', (req, res) => {
+  if (getYtLiveStatus().status !== 'offline') {
+    return res.status(409).json({ error: 'Cannot remove background while stream is active.' })
+  }
   clearYtBackground()
   res.json(getYtLiveStatus())
 })

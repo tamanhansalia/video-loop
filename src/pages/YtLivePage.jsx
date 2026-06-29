@@ -115,6 +115,13 @@ export default function YtLivePage() {
     } catch (err) { showNotice(err.message, 'error') }
   }
 
+  async function handleRemoveKey() {
+    try {
+      await apiDelete('/api/yt-live/stream-key')
+      showNotice('Stream key removed.', 'success')
+    } catch (err) { showNotice(err.message, 'error') }
+  }
+
   async function handleBgUpload(e) {
     const file = e.target.files?.[0]
     if (!file) return
@@ -240,9 +247,18 @@ export default function YtLivePage() {
           <div className="border border-zinc-800 p-6">
             <p className="text-xs font-bold uppercase tracking-widest text-zinc-400 mb-4">Stream Key</p>
             {s.hasStreamKey && (
-              <p className="text-xs font-mono text-zinc-500 mb-3">
-                Saved: {s.streamKeyPreview}
-              </p>
+              <div className="flex items-center justify-between mb-3">
+                <p className="text-xs font-mono text-zinc-500">
+                  Saved: {s.streamKeyPreview}
+                </p>
+                <button
+                  onClick={handleRemoveKey}
+                  disabled={isLive}
+                  className="text-xs text-red-500 hover:text-red-400 transition-colors disabled:opacity-30"
+                >
+                  Remove Key
+                </button>
+              </div>
             )}
             <div className="flex gap-2">
               <input
