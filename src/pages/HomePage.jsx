@@ -40,6 +40,18 @@ export default function HomePage() {
             </p>
           </button>
 
+          {/* YouTube Live */}
+          <button
+            onClick={() => navigate('/yt-live')}
+            className="border border-zinc-900 p-8 cursor-pointer hover:border-zinc-700 hover:bg-zinc-950 transition-colors w-full text-left"
+          >
+            <p className="text-2xl font-mono text-zinc-700 mb-4">YT LIVE</p>
+            <p className="text-sm font-bold uppercase tracking-wider text-white">YouTube Live</p>
+            <p className="text-xs text-zinc-600 mt-2 leading-relaxed">
+              Stream background audio loops and static video directly to YouTube 24/7
+            </p>
+          </button>
+
           {/* Loop Generator */}
           <button
             onClick={() => navigate('/loop')}
