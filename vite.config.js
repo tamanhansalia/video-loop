@@ -21,6 +21,10 @@ export default defineConfig({
       '/live-assets': {
         target: 'http://localhost:5000',
         changeOrigin: true,
+      },
+      '/yt-live-assets': {
+        target: 'http://localhost:5000',
+        changeOrigin: true,
       }
     }
   }

@@ -25,6 +25,7 @@ export default function Layout({ children }) {
               ['/audio-merge', 'Audio Merger', false],
               ['/audio-loop', 'Audio Looper', false],
               ['/live-control', 'Live Studio', false],
+              ['/yt-live', 'YT Live', false],
               ['/history', 'History', false],
               ['/settings', 'Settings', false],
             ].map(([to, label, exact]) => (

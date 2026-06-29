@@ -29,6 +29,19 @@ import {
   skipLiveStudioTrack,
 } from './live_studio.js'
 import { sanitizeWaveformVisualConfig } from '../src/lib/waveformVisual.js'
+import {
+  YT_LIVE_ASSETS_DIR,
+  initYtStreamer,
+  getYtLiveStatus,
+  setYtStreamKey,
+  addYtAudioFiles,
+  removeYtAudioFile,
+  setYtBackground,
+  clearYtBackground,
+  startYtStream,
+  stopYtStream,
+  restartYtStream,
+} from './yt_streamer.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PORT = process.env.PORT || 5000
@@ -54,6 +67,7 @@ let systemInfoPromise = null
 app.use('/outputs', express.static(OUTPUTS_DIR))
 app.use('/uploads', express.static(UPLOADS_DIR))
 app.use('/live-assets', express.static(LIVE_ASSETS_DIR))
+app.use('/yt-live-assets', express.static(YT_LIVE_ASSETS_DIR))
 
 // Set up storage
 const storage = multer.diskStorage({
@@ -81,6 +95,12 @@ const liveAssetUpload = multer({
   storage: liveAssetStorage,
   limits: { fileSize: MAX_UPLOAD_BYTES },
 })
+
+const ytLiveStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, YT_LIVE_ASSETS_DIR),
+  filename: (req, file, cb) => cb(null, Date.now() + '_' + file.originalname.replace(/[^a-zA-Z0-9.]/g, '_')),
+})
+const ytLiveUpload = multer({ storage: ytLiveStorage, limits: { fileSize: MAX_UPLOAD_BYTES } })
 
 function removeUploadedFiles(files) {
   for (const file of files.filter(Boolean)) {
@@ -198,6 +218,7 @@ wss.on('connection', (ws) => {
   clients.add(ws)
   try {
     ws.send(JSON.stringify({ type: 'live_state', state: getLiveStudioPublicState() }))
+    ws.send(JSON.stringify({ type: 'yt_live_status', state: getYtLiveStatus() }))
   } catch {
     // Ignore initial push failures.
   }
@@ -228,6 +249,14 @@ function broadcastLiveState() {
     broadcastMessage({ type: 'live_state', state: getLiveStudioPublicState() })
   } catch (err) {
     console.error('Live state broadcast error:', err)
+  }
+}
+
+function broadcastYtLiveStatus() {
+  try {
+    broadcastMessage({ type: 'yt_live_status', state: getYtLiveStatus() })
+  } catch (err) {
+    console.error('YT live status broadcast error:', err)
   }
 }
 
@@ -922,6 +951,85 @@ app.post('/api/probe', upload.single('video'), async (req, res) => {
   }
 })
 
+// ── YouTube Live Streaming ──────────────────────────────────────────────────
+
+app.get('/api/yt-live/status', (req, res) => {
+  res.json(getYtLiveStatus())
+})
+
+app.post('/api/yt-live/stream-key', (req, res) => {
+  const { streamKey } = req.body
+  if (!streamKey || typeof streamKey !== 'string') {
+    return res.status(400).json({ error: 'Stream key is required.' })
+  }
+  setYtStreamKey(streamKey.trim())
+  res.json({ success: true })
+})
+
+app.post('/api/yt-live/audio', ytLiveUpload.array('audio'), async (req, res) => {
+  const files = req.files || []
+  try {
+    if (files.length === 0) return res.status(400).json({ error: 'At least one audio file is required.' })
+    const invalid = files.find(f => !isAudioFile(f))
+    if (invalid) {
+      removeUploadedFiles(files)
+      return res.status(400).json({ error: `Unsupported file: ${invalid.originalname}` })
+    }
+    const withDuration = []
+    for (const file of files) {
+      const probeData = await probeMedia(file.path)
+      const { duration } = getDurationFromProbe(probeData, 'audio')
+      withDuration.push({ ...file, durationSec: duration || 0 })
+    }
+    addYtAudioFiles(withDuration)
+    res.status(201).json(getYtLiveStatus())
+  } catch (err) {
+    removeUploadedFiles(files)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.delete('/api/yt-live/audio/:id', (req, res) => {
+  const removed = removeYtAudioFile(req.params.id)
+  if (!removed) return res.status(404).json({ error: 'Track not found.' })
+  res.json(getYtLiveStatus())
+})
+
+app.post('/api/yt-live/background', ytLiveUpload.single('background'), async (req, res) => {
+  const file = req.file
+  try {
+    if (!file) return res.status(400).json({ error: 'A background file is required.' })
+    if (!isImageFile(file) && !isVideoFile(file)) {
+      removeUploadedFiles([file])
+      return res.status(400).json({ error: 'File must be an image or video.' })
+    }
+    setYtBackground(file, isImageFile(file) ? 'image' : 'video')
+    res.status(201).json(getYtLiveStatus())
+  } catch (err) {
+    removeUploadedFiles([file])
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.delete('/api/yt-live/background', (req, res) => {
+  clearYtBackground()
+  res.json(getYtLiveStatus())
+})
+
+app.post('/api/yt-live/start', (req, res) => {
+  const result = startYtStream()
+  if (result.error) return res.status(400).json(result)
+  res.json(result)
+})
+
+app.post('/api/yt-live/stop', (req, res) => {
+  res.json(stopYtStream())
+})
+
+app.post('/api/yt-live/restart', (req, res) => {
+  res.json(restartYtStream())
+})
+
 app.use((err, req, res, next) => {
   if (err instanceof multer.MulterError) {
     if (err.code === 'LIMIT_FILE_SIZE') {
@@ -934,6 +1042,7 @@ app.use((err, req, res, next) => {
 
 // Initialize DB and launch server
 initDb().then(() => {
+  initYtStreamer(broadcastYtLiveStatus)
   server.listen(PORT, () => {
     console.log(`Backend server listening on port ${PORT}`)
     // Start worker in case there are pending jobs on restart

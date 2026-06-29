@@ -12,6 +12,7 @@ import HistoryPage from './pages/HistoryPage'
 import LiveControlPage from './pages/LiveControlPage'
 import LivePage from './pages/LivePage'
 import WaveformVisualPage from './pages/WaveformVisualPage'
+import YtLivePage from './pages/YtLivePage'
 
 export default function App() {
   return (
@@ -29,6 +30,7 @@ export default function App() {
           <Route path="/waveform-visual" element={<WaveformVisualPage />} />
           <Route path="/live-control" element={<LiveControlPage />} />
           <Route path="/live" element={<LivePage />} />
+          <Route path="/yt-live" element={<YtLivePage />} />
           <Route path="/history" element={<HistoryPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
