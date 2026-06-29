@@ -109,6 +109,9 @@ export default function YtLivePage() {
     if (!keyInput.trim()) return
     try {
       await apiPost('/api/yt-live/stream-key', { streamKey: keyInput.trim() })
+      try {
+        localStorage.setItem('yt_stream_key', keyInput.trim())
+      } catch { /* ignore security/quota errors */ }
       setKeyInput('')
       setKeyVisible(false)
       showNotice('Stream key saved.', 'success')
@@ -282,6 +285,14 @@ export default function YtLivePage() {
                 Save
               </button>
             </div>
+            {typeof window !== 'undefined' && localStorage.getItem('yt_stream_key') && !keyInput && (
+              <button
+                onClick={() => setKeyInput(localStorage.getItem('yt_stream_key') || '')}
+                className="text-[10px] font-mono text-zinc-500 hover:text-zinc-400 hover:underline transition-colors mt-2 text-left block"
+              >
+                ← Autofill last stream key
+              </button>
+            )}
           </div>
 
           {/* Background */}
